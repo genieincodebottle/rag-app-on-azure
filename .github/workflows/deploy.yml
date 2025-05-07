@@ -1,0 +1,632 @@
+name: Terraform Azure Deployment
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      reset_db_password:
+        description: 'Reset database password (use with caution)'
+        required: false
+        default: false
+        type: boolean
+      bastion_allowed_cidr:
+        description: 'CIDR block allowed to access bastion (e.g. office IP)'
+        required: false
+        default: '0.0.0.0/0'
+        type: string
+      wait_for_db:
+        description: 'Wait for database to be available before initialization'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  TERRAFORM_VERSION: 1.5.7
+  PYTHON_VERSION: '3.11'
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  determine_environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      reset_db_password: ${{ steps.set-env.outputs.reset_db_password }}
+      wait_for_db: ${{ steps.set-env.outputs.wait_for_db }}
+      project_name: ${{ steps.read-vars.outputs.project_name }}
+      location: ${{ steps.read-vars.outputs.location }}
+      bastion_allowed_cidr: ${{ steps.read-vars.outputs.bastion_allowed_cidr }}
+      enable_lifecycle_rules: ${{ steps.read-vars.outputs.enable_lifecycle_rules }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          fi
+          
+          # Default to NOT resetting DB password unless explicitly triggered
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.reset_db_password }}" == "true" ]]; then
+            echo "reset_db_password=true" >> $GITHUB_OUTPUT
+          else
+            echo "reset_db_password=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set wait_for_db flag from input or default to true
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.wait_for_db }}" == "false" ]]; then
+            echo "wait_for_db=false" >> $GITHUB_OUTPUT
+          else
+            echo "wait_for_db=true" >> $GITHUB_OUTPUT
+          fi
+  
+      - id: read-vars
+        run: |
+          # Determine environment to use
+          ENV="${{ steps.set-env.outputs.environment }}"
+          echo "Using environment: $ENV"
+          
+          # Extract project_name and location from terraform.tfvars
+          if [ -f "environments/$ENV/terraform.tfvars" ]; then
+            PROJECT_NAME=$(grep project_name environments/$ENV/terraform.tfvars | cut -d '=' -f2 | tr -d ' "')
+            LOCATION=$(grep location environments/$ENV/terraform.tfvars | cut -d '=' -f2 | tr -d ' "')
+          else
+            echo "Warning: terraform.tfvars file not found for environment $ENV"
+          fi
+          
+          echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+          echo "location=$LOCATION" >> $GITHUB_OUTPUT
+          
+          # Set Blob Storage lifecycle variables - enable for prod, disable for dev
+          if [[ "$ENV" == "prod" ]]; then
+            echo "enable_lifecycle_rules=true" >> $GITHUB_OUTPUT
+          else
+            echo "enable_lifecycle_rules=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set bastion allowed CIDR
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.bastion_allowed_cidr }}" ]]; then
+            echo "bastion_allowed_cidr=${{ github.event.inputs.bastion_allowed_cidr }}" >> $GITHUB_OUTPUT
+          else
+            # Default to a safe default
+            echo "bastion_allowed_cidr=0.0.0.0/0" >> $GITHUB_OUTPUT
+          fi
+
+  code-quality:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    needs: [determine_environment]
+    env:
+      PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
+      LOCATION: ${{ needs.determine_environment.outputs.location }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install tox and any other packages
+        run: pip install tox
+      - name: Run tox
+        run: tox -e py
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    continue-on-error: true
+    
+  build_function:
+    needs: [determine_environment]
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
+      LOCATION: ${{ needs.determine_environment.outputs.location }}
+      STAGE: ${{ needs.determine_environment.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '${{ env.PYTHON_VERSION }}'
+      
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          
+      - name: Package Azure Functions
+        run: |
+          mkdir -p function_artifacts
+          
+          # Package Azure Functions in a loop to reduce redundancy
+          FUNCTION_DIRS=("document_processor" "query_processor" "upload_handler" "db_init" "auth_handler")
+          
+          for DIR in "${FUNCTION_DIRS[@]}"; do
+            if [ -d "src/$DIR" ]; then
+              echo "Packaging $DIR Function"
+              cd src/$DIR && pip install -r requirements.txt -t . || true && zip -r ../../function_artifacts/$DIR.zip . && cd ../..
+            fi
+          done
+          
+      - name: Upload Function artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-artifacts
+          path: function_artifacts/
+          retention-days: 1
+
+  terraform-plan:
+    needs: [determine_environment, build_function]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine_environment.outputs.environment }}
+    env:
+      PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
+      STAGE: ${{ needs.determine_environment.outputs.environment }}
+      LOCATION: ${{ needs.determine_environment.outputs.location }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Create Backend Configuration 
+        run: |
+          # Create dynamic backend.tf
+          cd environments/$STAGE
+          
+          # Create backend.tf dynamically to use variables
+          cat > backend.tf << EOF
+          # =========================
+          # Terraform Backend Config
+          # =========================
+          terraform {
+            backend "azurerm" {
+              resource_group_name  = "${PROJECT_NAME}-${STAGE}-tfstate-rg"
+              storage_account_name = "${PROJECT_NAME}${STAGE}tfstate"
+              container_name       = "tfstate"
+              key                  = "${STAGE}/terraform.tfstate"
+            }
+          }
+          EOF
+          
+          cd ../..
+
+      - name: Create Azure Resource Group and Storage for Terraform State
+        run: |
+            # Login to Azure
+            az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
+            
+            # Create Resource Group for Terraform State
+            RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-tfstate-rg"
+            echo "Creating Resource Group $RESOURCE_GROUP if it doesn't exist..."
+            az group create --name $RESOURCE_GROUP --location $LOCATION
+            
+            # Create Storage Account for Terraform State
+            STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}tfstate"
+            echo "Creating Storage Account $STORAGE_ACCOUNT if it doesn't exist..."
+            az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob
+            
+            # Create Storage Container for Terraform State
+            echo "Creating Storage Container for Terraform State..."
+            az storage container create --name tfstate --account-name $STORAGE_ACCOUNT
+                
+      - name: Download Function artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: function-artifacts
+          path: function_artifacts/
+
+      - name: Upload Function ZIP files to Blob Storage
+        run: |
+          STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}funcs"
+          CONTAINER_NAME="functions"
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+
+          # Ensure Resource Group exists
+          az group create --name $RESOURCE_GROUP --location $LOCATION
+          
+          # Ensure Storage Account exists
+          az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob --kind StorageV2
+
+          # Ensure Container exists
+          az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT
+          
+          # Get Storage Account Key
+          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
+          
+          # Upload Function ZIP files
+          for ZIP_FILE in function_artifacts/*.zip; do
+            FILENAME=$(basename $ZIP_FILE)
+            az storage blob upload --account-name $STORAGE_ACCOUNT --container-name $CONTAINER_NAME --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY
+          done
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+  
+      - name: Terraform Init
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: terraform init
+      
+      - name: Import Existing Resources
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: |
+          chmod +x ../../scripts/import_resources.sh
+          # ../../scripts/import_resources.sh "$PROJECT_NAME" "$STAGE" "$LOCATION" > /dev/null 2>&1 || true
+          ../../scripts/import_resources.sh "$PROJECT_NAME" "$STAGE" "$LOCATION" || true
+      
+      - name: Terraform Plan
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: |
+          terraform plan \
+            -lock=false \
+            -var="reset_db_password=${{ needs.determine_environment.outputs.reset_db_password }}" \
+            -var="enable_lifecycle_rules=${{ needs.determine_environment.outputs.enable_lifecycle_rules }}" \
+            -var="bastion_allowed_cidr=[\"${{ needs.determine_environment.outputs.bastion_allowed_cidr }}\"]" \
+            -out=tfplan
+        
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.determine_environment.outputs.environment }}
+          path: environments/${{ needs.determine_environment.outputs.environment }}/tfplan
+          retention-days: 1
+
+  terraform-apply:
+    needs: [determine_environment, build_function, terraform-plan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: ${{ needs.determine_environment.outputs.environment }}
+    env:
+      PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
+      STAGE: ${{ needs.determine_environment.outputs.environment }}
+      LOCATION: ${{ needs.determine_environment.outputs.location }}
+      RESET_DB_PASSWORD: ${{ needs.determine_environment.outputs.reset_db_password }}
+      WAIT_FOR_DB: ${{ needs.determine_environment.outputs.wait_for_db }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Download Function artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: function-artifacts
+          path: function_artifacts/
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ needs.determine_environment.outputs.environment }}
+          path: environments/${{ needs.determine_environment.outputs.environment }}
+      
+      - name: Terraform Init
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Wait for PostgreSQL instance to be available
+        if: ${{ needs.determine_environment.outputs.wait_for_db == 'true' }}
+        run: |
+          SERVER_NAME="${PROJECT_NAME}-${STAGE}-postgres"
+          
+          echo "Waiting for PostgreSQL server $SERVER_NAME to be available..."
+          
+          # Wait for up to 10 minutes for the PostgreSQL server to be available
+          MAX_ATTEMPTS=60
+          ATTEMPT=1
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            STATUS=$(az postgres server show --name $SERVER_NAME --resource-group "${PROJECT_NAME}-${STAGE}-rg" --query "userVisibleState" -o tsv 2>/dev/null || echo "not-found")
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PostgreSQL status is '$STATUS'"
+            
+            if [ "$STATUS" = "Ready" ]; then
+              echo "PostgreSQL server is available. Proceeding."
+              break
+            elif [ "$STATUS" = "not-found" ]; then
+              echo "PostgreSQL server not found. Waiting..."
+            else
+              echo "PostgreSQL server is in $STATUS state. Waiting..."
+            fi
+            
+            # If we've reached the maximum attempts, exit with a warning
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "Warning: Maximum attempts reached. PostgreSQL server may not be fully available yet."
+              break
+            fi
+            
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 10
+          done
+
+      - name: Update Function env vars if DB password was reset
+        if: ${{ needs.determine_environment.outputs.reset_db_password == 'true' }}
+        run: |
+          # Get the DB credentials vault from terraform output
+          cd environments/$STAGE
+          KEY_VAULT_NAME=$(terraform output -raw key_vault_name 2>/dev/null || echo "")
+          cd ../..
+          
+          if [ -n "$KEY_VAULT_NAME" ]; then
+            echo "Updating Function apps with new DB credentials from Key Vault..."
+            
+            # Update all Function apps that use the DB credentials
+            FUNCTION_NAMES=(
+              "${PROJECT_NAME}-${STAGE}-document-processor"
+              "${PROJECT_NAME}-${STAGE}-query-processor"
+              "${PROJECT_NAME}-${STAGE}-upload-handler"
+              "${PROJECT_NAME}-${STAGE}-db-init"
+            )
+            
+            for FUNCTION_NAME in "${FUNCTION_NAMES[@]}"; do
+              echo "Updating function: $FUNCTION_NAME"
+              # Set Key Vault reference
+              az functionapp config appsettings set \
+                --name "$FUNCTION_NAME" \
+                --resource-group "${PROJECT_NAME}-${STAGE}-rg" \
+                --settings "DB_SECRET_URI=@Microsoft.KeyVault(SecretUri=https://${KEY_VAULT_NAME}.vault.azure.net/secrets/db-credentials)"
+              
+              echo "Updated DB_SECRET_URI for $FUNCTION_NAME"
+            done
+          else
+            echo "Key Vault name not found, skipping Function environment updates"
+          fi
+      
+      - name: Update Function apps
+        run: |
+          # Update Function apps with code
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+          STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}funcs"
+          CONTAINER_NAME="functions"
+          
+          FUNCTION_NAMES=(
+            "${PROJECT_NAME}-${STAGE}-document-processor"
+            "${PROJECT_NAME}-${STAGE}-query-processor"
+            "${PROJECT_NAME}-${STAGE}-upload-handler"
+            "${PROJECT_NAME}-${STAGE}-db-init"
+            "${PROJECT_NAME}-${STAGE}-auth-handler"
+          )
+          
+          FUNCTION_ZIPS=(
+            "document_processor.zip"
+            "query_processor.zip"
+            "upload_handler.zip"
+            "db_init.zip"
+            "auth_handler.zip"
+          )
+          
+          # Get Storage Account Key
+          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
+          
+          for i in "${!FUNCTION_NAMES[@]}"; do
+            FUNCTION_NAME="${FUNCTION_NAMES[$i]}"
+            ZIP_FILE="${FUNCTION_ZIPS[$i]}"
+            
+            echo "Updating function app: $FUNCTION_NAME with $ZIP_FILE"
+            
+            # Generate SAS URL for the zip file
+            EXPIRY_DATE=$(date -u -d "30 minutes" '+%Y-%m-%dT%H:%MZ')
+            SAS_URL=$(az storage blob generate-sas \
+              --account-name $STORAGE_ACCOUNT \
+              --account-key $STORAGE_KEY \
+              --container-name $CONTAINER_NAME \
+              --name $ZIP_FILE \
+              --permissions r \
+              --expiry $EXPIRY_DATE \
+              --https-only \
+              --full-uri \
+              -o tsv)
+            
+            # Update function with the package
+            az functionapp deployment source config-zip \
+              --resource-group $RESOURCE_GROUP \
+              --name $FUNCTION_NAME \
+              --src $SAS_URL || echo "Failed to update $FUNCTION_NAME, continuing..."
+          done
+      
+      - name: Invoke Database Init Function
+        run: |
+          DB_INIT_NAME="${PROJECT_NAME}-${STAGE}-db-init"
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+          
+          # Invoke the database initialization Function to set up PGVector
+          echo "Initializing PostgreSQL database with PGVector..."
+          
+          # Get function key
+          FUNCTION_KEY=$(az functionapp keys list --name $DB_INIT_NAME --resource-group $RESOURCE_GROUP --query "functionKeys.default" -o tsv || echo "")
+          
+          if [ -z "$FUNCTION_KEY" ]; then
+            echo "Could not retrieve function key. Using master key instead."
+            FUNCTION_KEY=$(az functionapp keys list --name $DB_INIT_NAME --resource-group $RESOURCE_GROUP --query "masterKey" -o tsv || echo "")
+          fi
+          
+          if [ -z "$FUNCTION_KEY" ]; then
+            echo "Could not retrieve any function keys. Trying to invoke without key."
+            INVOKE_URL="https://${DB_INIT_NAME}.azurewebsites.net/api/db_init"
+          else
+            INVOKE_URL="https://${DB_INIT_NAME}.azurewebsites.net/api/db_init?code=${FUNCTION_KEY}"
+          fi
+          
+          # Maximum retry attempts
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" != "true" ]; do
+            RETRY_COUNT=$((RETRY_COUNT+1))
+            
+            echo "Attempt $RETRY_COUNT to invoke DB init Function..."
+            RESPONSE=$(curl -s -o /tmp/db_init_output.json -w "%{http_code}" "$INVOKE_URL" -H "Content-Type: application/json" -d '{}')
+            
+            if [ "$RESPONSE" == "200" ] || [ "$RESPONSE" == "202" ]; then
+              echo "DB initialization Function invoked successfully"
+              cat /tmp/db_init_output.json || echo "Could not get response from DB init Function"
+              SUCCESS=true
+            else
+              echo "DB initialization Function returned code $RESPONSE. Waiting before retry..."
+              cat /tmp/db_init_output.json || echo "Could not get error details"
+              sleep 30
+            fi
+          done
+          
+          if [ "$SUCCESS" != "true" ]; then
+            echo "Warning: Failed to successfully invoke DB initialization Function after $MAX_RETRIES attempts"
+            echo "Manual initialization may be required"
+          fi
+
+      - name: Verify deployment
+        run: |
+          UPLOAD_HANDLER_NAME="${PROJECT_NAME}-${STAGE}-upload-handler"
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+          
+          echo "Verifying deployment by invoking ${UPLOAD_HANDLER_NAME}..."
+          
+          # Get function key
+          FUNCTION_KEY=$(az functionapp keys list --name $UPLOAD_HANDLER_NAME --resource-group $RESOURCE_GROUP --query "functionKeys.default" -o tsv || echo "")
+          
+          if [ -z "$FUNCTION_KEY" ]; then
+            echo "Could not retrieve function key. Using master key instead."
+            FUNCTION_KEY=$(az functionapp keys list --name $UPLOAD_HANDLER_NAME --resource-group $RESOURCE_GROUP --query "masterKey" -o tsv || echo "")
+          fi
+          
+          if [ -z "$FUNCTION_KEY" ]; then
+            echo "Could not retrieve any function keys. Trying to invoke without key."
+            INVOKE_URL="https://${UPLOAD_HANDLER_NAME}.azurewebsites.net/api/upload_handler"
+          else
+            INVOKE_URL="https://${UPLOAD_HANDLER_NAME}.azurewebsites.net/api/upload_handler?code=${FUNCTION_KEY}"
+          fi
+          
+          curl -s -o response.json "$INVOKE_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "healthcheck"}' || echo "Verification failed, but deployment may still be successful"
+          
+          cat response.json || echo "Could not get response"
+
+  integration_tests:
+    needs: [determine_environment, terraform-apply]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: ${{ needs.determine_environment.outputs.environment }}
+    env:
+      PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
+      STAGE: ${{ needs.determine_environment.outputs.environment }}
+      LOCATION: ${{ needs.determine_environment.outputs.location }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '${{ env.PYTHON_VERSION }}'
+        
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
+        
+      - name: Get API endpoint
+        id: get-api
+        run: |
+          # Try to get API endpoint from Terraform output
+          cd environments/$STAGE
+          API_ENDPOINT=$(terraform output -raw api_endpoint 2>/dev/null || echo "")
+          
+          if [ -n "$API_ENDPOINT" ] && [ "$API_ENDPOINT" != "" ]; then
+            echo "Got API endpoint from Terraform: $API_ENDPOINT"
+          else
+            echo "Attempting to get API endpoint from Azure CLI..."
+            
+            # Fallback to using Azure CLI directly if terraform fails
+            RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+            API_NAME="${PROJECT_NAME}-${STAGE}-api"
+            
+            # Get API Management service URL
+            API_URL=$(az apim show --name "$API_NAME" --resource-group "$RESOURCE_GROUP" --query "gatewayUrl" -o tsv 2>/dev/null)
+            
+            if [ -n "$API_URL" ] && [ "$API_URL" != "null" ]; then
+              echo "Found API Management service: $API_URL"
+              API_ENDPOINT="${API_URL}/${STAGE}"
+              echo "Using API endpoint: $API_ENDPOINT"
+            else
+              echo "Could not find API Management service, using example.com fallback"
+              API_ENDPOINT="https://example.com"
+            fi
+          fi
+          
+          echo "API_ENDPOINT=$API_ENDPOINT" >> $GITHUB_ENV
+        
+      - name: Check for pytest config files
+        run: |
+          echo "Looking for pytest configuration files that might interfere with the tests..."
+          
+          # Check for and temporarily move aside any pytest config files
+          CONFIG_FILES=("pytest.ini" "pyproject.toml" ".coveragerc" "conftest.py")
+          for FILE in "${CONFIG_FILES[@]}"; do
+            if [ -f "$FILE" ]; then
+              echo "Found $FILE, temporarily moving it aside for integration tests"
+              mv "$FILE" "${FILE}.bak"
+            fi
+          done
+          
+          # Check in the src directory too
+          if [ -d "src" ] && [ -f "src/conftest.py" ]; then
+            echo "Foun

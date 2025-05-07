@@ -5,10 +5,10 @@
 # -------------------------
 # Project Configuration
 # -------------------------
-variable "aws_region" {
-  description = "AWS region for all resources"
+variable "location" {
+  description = "Azure region for all resources"
   type        = string
-  default     = "us-east-1"
+  default     = "eastus"
 }
 
 variable "project_name" {
@@ -23,45 +23,56 @@ variable "stage" {
 }
 
 # -------------------------
-# Lambda Configuration
+# Function Configuration
 # -------------------------
-variable "lambda_memory_size" {
-  description = "Memory size for Lambda functions in MB"
+variable "function_memory_size" {
+  description = "Memory size for Function apps in MB"
   type        = number
-  default     = 4096
+  default     = 1536
 }
 
-variable "lambda_timeout" {
-  description = "Timeout for Lambda functions in seconds"
+variable "function_timeout" {
+  description = "Timeout for Function apps in seconds"
   type        = number
   default     = 120
 }
 
 # -------------------------
-# VPC Configuration
+# Network Configuration
 # -------------------------
-variable "vpc_cidr" {
-  description = "CIDR block for the VPC"
+variable "address_space" {
+  description = "CIDR block for the Virtual Network"
   type        = string
   default     = "10.0.0.0/16"
 }
 
-variable "az_count" {
-  description = "Number of Availability Zones to use"
-  type        = number
-  default     = 2
+variable "subnet_prefixes" {
+  description = "Subnet address prefixes"
+  type        = map(string)
+  default = {
+    function = "10.0.0.0/24"
+    database = "10.0.1.0/24"
+    api      = "10.0.2.0/24"
+    bastion  = "10.0.3.0/24"
+  }
 }
 
 variable "single_nat_gateway" {
-  description = "NAT Gateway to use"
+  description = "Use a single NAT Gateway instead of one per AZ (cost saving for dev)"
   type        = bool
   default     = true
 }
 
 variable "enable_flow_logs" {
-  description = "Enable flow log"
+  description = "Enable Network Flow Logs for monitoring"
   type        = bool
   default     = false
+}
+
+variable "create_bastion" {
+  description = "Create an Azure Bastion service"
+  type        = bool
+  default     = true
 }
 
 variable "bastion_allowed_cidr" {
@@ -70,25 +81,19 @@ variable "bastion_allowed_cidr" {
   default     = ["0.0.0.0/0"]  # Should be restricted to your company IP range in production
 }
 
-variable "create_bastion_sg" {
-  description = "Create a security group for bastion hosts"
-  type        = bool
-  default     = true
-}
-
 # -------------------------
 # Database Configuration
 # -------------------------
-variable "db_instance_class" {
-  description = "Instance class for the RDS instance"
+variable "db_sku_name" {
+  description = "SKU name for the PostgreSQL Flexible Server"
   type        = string
-  default     = "db.t3.micro"
+  default     = "B_Standard_B1ms"
 }
 
-variable "db_allocated_storage" {
-  description = "Allocated storage for the RDS instance in GiB"
+variable "db_storage_mb" {
+  description = "Storage for the PostgreSQL server in MB"
   type        = number
-  default     = 20
+  default     = 5120 # 5GB
 }
 
 variable "db_name" {
@@ -103,12 +108,6 @@ variable "db_username" {
   default     = "ragadmin"
 }
 
-variable "import_db" {
-  description = "Whether to import existing database instead of creating a new one"
-  type        = bool
-  default     = false
-}
-
 variable "reset_db_password" {
   description = "Flag to reset the database password"
   type        = bool
@@ -119,19 +118,19 @@ variable "reset_db_password" {
 # Storage Configuration
 # -------------------------
 variable "enable_lifecycle_rules" {
-  description = "Enable S3 lifecycle rules for cost optimization"
+  description = "Enable Storage lifecycle rules for cost optimization"
   type        = bool
   default     = true
 }
 
 variable "standard_ia_transition_days" {
-  description = "Days before transitioning to STANDARD_IA storage class"
+  description = "Days before transitioning to Cool storage tier"
   type        = number
   default     = 90
 }
 
-variable "glacier_transition_days" {
-  description = "Days before transitioning to GLACIER storage class"
+variable "archive_transition_days" {
+  description = "Days before transitioning to Archive storage tier"
   type        = number
   default     = 365
 }
@@ -140,7 +139,7 @@ variable "glacier_transition_days" {
 # Monitoring Configuration
 # -------------------------
 variable "alert_email" {
-  description = "Email address for CloudWatch alerts"
+  description = "Email address for monitoring alerts"
   type        = string
   default     = ""  # Set this in your tfvars file
 }
@@ -148,14 +147,14 @@ variable "alert_email" {
 # -------------------------
 # Dashboard References
 # -------------------------
-variable "metadata_table_name" {
-  description = "Name of the DynamoDB table for metadata (used in prod dashboards)"
+variable "metadata_container_name" {
+  description = "Name of the Cosmos DB container for metadata (used in prod dashboards)"
   type        = string
   default     = ""
 }
 
-variable "documents_bucket_name" {
-  description = "Name of the S3 bucket for documents (used in prod dashboards)"
+variable "documents_container_name" {
+  description = "Name of the Storage container for documents (used in prod dashboards)"
   type        = string
   default     = ""
 }
@@ -166,7 +165,7 @@ variable "documents_bucket_name" {
 variable "github_repo" {
   description = "GitHub Repo Name"
   type        = string
-  default     = "genieincodebottle/rag-app-on-aws"
+  default     = "genieincodebottle/rag-app-on-azure"
 }
 
 variable "github_branch" {

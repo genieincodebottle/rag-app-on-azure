@@ -1,563 +1,351 @@
+# src/auth_handler/auth_handler.py
+
 """
-Lambda function to handle authentication operations.
+Azure Function to handle authentication operations with Azure AD B2C.
 """
 import os
 import json
-import boto3
 import logging
-import hmac
-import hashlib
-import base64
-from datetime import datetime
+import azure.functions as func
+import requests
+import uuid
+from datetime import datetime, timedelta
+from urllib.parse import urlencode
 
 # Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Initialize AWS clients
-cognito = boto3.client('cognito-idp')
 
 # Get environment variables
-USER_POOL_ID = os.environ.get('USER_POOL_ID')
-CLIENT_ID = os.environ.get('CLIENT_ID')
+AAD_B2C_TENANT_ID = os.environ.get('AAD_B2C_TENANT_ID')
+AAD_B2C_APPLICATION_ID = os.environ.get('AAD_B2C_APPLICATION_ID')
+AAD_B2C_CLIENT_SECRET = os.environ.get('AAD_B2C_CLIENT_SECRET', '')  # Optional, for confidential clients
+AAD_B2C_POLICY_NAME = os.environ.get('AAD_B2C_POLICY_NAME', 'B2C_1_SignUpSignIn')
+STAGE = os.environ.get('STAGE')
 
-def handler(event, context):
+# B2C endpoints
+def get_authority_url():
+    return f"https://{AAD_B2C_TENANT_ID}.b2clogin.com/{AAD_B2C_TENANT_ID}.onmicrosoft.com/{AAD_B2C_POLICY_NAME}"
+
+def get_token_endpoint():
+    return f"{get_authority_url()}/oauth2/v2.0/token"
+
+def get_user_info_endpoint():
+    return f"{get_authority_url()}/openid/v2.0/userinfo"
+
+def get_authorize_endpoint():
+    return f"{get_authority_url()}/oauth2/v2.0/authorize"
+
+def get_password_reset_endpoint():
+    return f"https://{AAD_B2C_TENANT_ID}.b2clogin.com/{AAD_B2C_TENANT_ID}.onmicrosoft.com/B2C_1_PasswordReset/oauth2/v2.0/authorize"
+
+def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Lambda function to handle authentication operations.
+    Azure Function to handle authentication operations.
     
     Supported operations:
-    - register: Register a new user
+    - register: Redirect to Azure AD B2C sign-up experience
     - login: Authenticate a user and return tokens
-    - verify: Verify email with confirmation code
-    - forgot_password: Initiate forgot password flow
-    - confirm_forgot_password: Complete forgot password flow
+    - verify: Not needed with Azure AD B2C (handled by policy)
+    - forgot_password: Redirect to Azure AD B2C password reset
     - refresh_token: Get new tokens using a refresh token
     
-    Args:
-        event (dict): API Gateway event containing auth operation details
-        context (object): Lambda context
-        
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response with status code and body
     """
-    logger.info(f"Received event: {json.dumps(event)}")
+    logger.info('Auth handler function processed a request.')
     
     try:
-        # Extract body from the request for API Gateway calls
-        body = {}
-        if 'body' in event:
-            if isinstance(event.get('body'), str) and event.get('body'):
-                try:
-                    body = json.loads(event['body'])
-                except json.JSONDecodeError:
-                    body = {}
-            elif isinstance(event.get('body'), dict):
-                body = event.get('body')
-                
+        # Parse request body
+        req_body = req.get_json()
+        
         # Check if this is a health check request
-        if event.get('action') == 'healthcheck' or body.get('action') == 'healthcheck':
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
-                    'message': 'Authentication service is healthy'
-                })
-            }
+        if req_body.get('action') == 'healthcheck':
+            return func.HttpResponse(
+                json.dumps({
+                    'message': 'Authentication service is healthy',
+                    'stage': STAGE
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
         
         # Get operation type
-        operation = body.get('operation')
+        operation = req_body.get('operation')
         
         if not operation:
-            return {
-                'statusCode': 400,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
+            return func.HttpResponse(
+                json.dumps({
                     'message': 'Operation is required'
-                })
-            }
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
         
         # Handle different operations
         if operation == 'register':
-            return register_user(body)
+            return register_user(req_body)
         elif operation == 'login':
-            return login_user(body)
+            return login_user(req_body)
         elif operation == 'verify':
-            return verify_user(body)
+            return verify_user(req_body)
         elif operation == 'forgot_password':
-            return forgot_password(body)
+            return forgot_password(req_body)
         elif operation == 'confirm_forgot_password':
-            return confirm_forgot_password(body)
+            return confirm_forgot_password(req_body)
         elif operation == 'refresh_token':
-            return refresh_token(body)
+            return refresh_token(req_body)
         else:
-            return {
-                'statusCode': 400,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
+            return func.HttpResponse(
+                json.dumps({
                     'message': f'Unknown operation: {operation}'
-                })
-            }
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
             
     except Exception as e:
         logger.error(f"Error processing authentication: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
+        return func.HttpResponse(
+            json.dumps({
                 'message': f"Error processing authentication: {str(e)}"
-            })
-        }
+            }),
+            mimetype="application/json",
+            status_code=500
+        )
 
 def register_user(params):
     """
-    Register a new user in Cognito User Pool.
+    Generate a link to Azure AD B2C sign-up experience.
     
     Args:
-        params (dict): Parameters including email, password, and attributes
+        params (dict): Parameters including redirect_uri and others
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response with sign-up URL
     """
-    email = params.get('email')
-    password = params.get('password')
-    name = params.get('name', '')
+    redirect_uri = params.get('redirect_uri', '')
     
-    if not email or not password:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Email and password are required'
-            })
-        }
-    
-    try:
-        # User attributes
-        user_attributes = [
-            {
-                'Name': 'email',
-                'Value': email
-            }
-        ]
-        
-        if name:
-            user_attributes.append({
-                'Name': 'name',
-                'Value': name
-            })
-        
-        # Register user
-        response = cognito.sign_up(
-            ClientId=CLIENT_ID,
-            Username=email,
-            Password=password,
-            UserAttributes=user_attributes
+    if not redirect_uri:
+        return func.HttpResponse(
+            json.dumps({
+                'message': 'Redirect URI is required'
+            }),
+            mimetype="application/json",
+            status_code=400
         )
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'User registered successfully. Please check your email for verification code.',
-                'user_id': response['UserSub']
-            })
-        }
-        
-    except cognito.exceptions.UsernameExistsException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'User with this email already exists.'
-            })
-        }
-        
-    except cognito.exceptions.InvalidPasswordException as e:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': str(e)
-            })
-        }
-        
-    except Exception as e:
-        logger.error(f"Error registering user: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error registering user: {str(e)}"
-            })
-        }
-
-def verify_user(params):
-    """
-    Verify a user's email with confirmation code.
     
-    Args:
-        params (dict): Parameters including email and confirmation_code
-        
-    Returns:
-        dict: Response with status code and body
-    """
-    email = params.get('email')
-    confirmation_code = params.get('confirmation_code')
+    # Generate a random state for CSRF protection
+    state = str(uuid.uuid4())
     
-    if not email or not confirmation_code:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Email and confirmation code are required'
-            })
-        }
+    # Build the sign-up URL
+    auth_url = get_authorize_endpoint()
+    query_params = {
+        'client_id': AAD_B2C_APPLICATION_ID,
+        'response_type': 'code',
+        'redirect_uri': redirect_uri,
+        'response_mode': 'query',
+        'scope': 'openid profile offline_access',
+        'state': state
+    }
     
-    try:
-        # Confirm sign up
-        cognito.confirm_sign_up(
-            ClientId=CLIENT_ID,
-            Username=email,
-            ConfirmationCode=confirmation_code
-        )
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'User verified successfully.'
-            })
-        }
-        
-    except cognito.exceptions.CodeMismatchException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Invalid verification code.'
-            })
-        }
-        
-    except cognito.exceptions.ExpiredCodeException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Verification code has expired.'
-            })
-        }
-        
-    except Exception as e:
-        logger.error(f"Error verifying user: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error verifying user: {str(e)}"
-            })
-        }
+    sign_up_url = f"{auth_url}?{urlencode(query_params)}"
+    
+    return func.HttpResponse(
+        json.dumps({
+            'message': 'Redirect to sign-up experience',
+            'sign_up_url': sign_up_url,
+            'state': state
+        }),
+        mimetype="application/json",
+        status_code=200
+    )
 
 def login_user(params):
     """
-    Authenticate a user and return tokens.
+    Handle login authentication flow.
+    
+    Two different modes:
+    1. Direct login with username/password (if policy allows)
+    2. Token exchange with authorization code from redirect
     
     Args:
-        params (dict): Parameters including email and password
+        params (dict): Parameters including username/password or code
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response with authentication result
     """
-    email = params.get('email')
-    password = params.get('password')
+    # Check if this is a code exchange after redirect
+    code = params.get('code')
+    redirect_uri = params.get('redirect_uri')
     
-    if not email or not password:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Email and password are required'
-            })
+    if code and redirect_uri:
+        # Exchange authorization code for tokens
+        token_endpoint = get_token_endpoint()
+        
+        token_data = {
+            'grant_type': 'authorization_code',
+            'client_id': AAD_B2C_APPLICATION_ID,
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'scope': 'openid profile offline_access'
         }
-    
-    try:
-        # Authenticate user
-        response = cognito.initiate_auth(
-            ClientId=CLIENT_ID,
-            AuthFlow='USER_PASSWORD_AUTH',
-            AuthParameters={
-                'USERNAME': email,
-                'PASSWORD': password
-            }
+        
+        # Add client secret if available (for confidential clients)
+        if AAD_B2C_CLIENT_SECRET:
+            token_data['client_secret'] = AAD_B2C_CLIENT_SECRET
+        
+        # Exchange code for tokens
+        try:
+            response = requests.post(token_endpoint, data=token_data)
+            response.raise_for_status()
+            token_response = response.json()
+            
+            return func.HttpResponse(
+                json.dumps({
+                    'message': 'Login successful',
+                    'access_token': token_response.get('access_token'),
+                    'id_token': token_response.get('id_token'),
+                    'refresh_token': token_response.get('refresh_token'),
+                    'expires_in': token_response.get('expires_in'),
+                    'token_type': token_response.get('token_type', 'Bearer')
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        except requests.RequestException as e:
+            logger.error(f"Error exchanging code for tokens: {str(e)}")
+            return func.HttpResponse(
+                json.dumps({
+                    'message': f"Error exchanging code for tokens: {str(e)}"
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
+    else:
+        # Direct login flow (username/password) - usually not supported with B2C
+        # Provide a link to the hosted login page instead
+        redirect_uri = params.get('redirect_uri', '')
+        
+        if not redirect_uri:
+            return func.HttpResponse(
+                json.dumps({
+                    'message': 'Redirect URI is required'
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
+        
+        # Generate a random state for CSRF protection
+        state = str(uuid.uuid4())
+        
+        # Build the login URL
+        auth_url = get_authorize_endpoint()
+        query_params = {
+            'client_id': AAD_B2C_APPLICATION_ID,
+            'response_type': 'code',
+            'redirect_uri': redirect_uri,
+            'response_mode': 'query',
+            'scope': 'openid profile offline_access',
+            'state': state
+        }
+        
+        login_url = f"{auth_url}?{urlencode(query_params)}"
+        
+        return func.HttpResponse(
+            json.dumps({
+                'message': 'Redirect to login page',
+                'login_url': login_url,
+                'state': state
+            }),
+            mimetype="application/json",
+            status_code=200
         )
+
+def verify_user(params):
+    """
+    In Azure AD B2C, verification is handled by the policy.
+    This is a placeholder function.
+    
+    Args:
+        params (dict): Parameters
         
-        # Extract tokens
-        auth_result = response['AuthenticationResult']
-        access_token = auth_result.get('AccessToken')
-        id_token = auth_result.get('IdToken')
-        refresh_token = auth_result.get('RefreshToken')
-        expires_in = auth_result.get('ExpiresIn', 3600)
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Login successful.',
-                'access_token': access_token,
-                'id_token': id_token,
-                'refresh_token': refresh_token,
-                'expires_in': expires_in,
-                'token_type': 'Bearer'
-            })
-        }
-        
-    except cognito.exceptions.UserNotConfirmedException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'User is not confirmed. Please verify your email first.',
-                'error_code': 'UserNotConfirmed'
-            })
-        }
-        
-    except cognito.exceptions.NotAuthorizedException:
-        return {
-            'statusCode': 401,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Incorrect username or password.'
-            })
-        }
-        
-    except Exception as e:
-        logger.error(f"Error logging in user: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error logging in user: {str(e)}"
-            })
-        }
+    Returns:
+        func.HttpResponse: Response
+    """
+    return func.HttpResponse(
+        json.dumps({
+            'message': 'User verification is handled by Azure AD B2C policy'
+        }),
+        mimetype="application/json",
+        status_code=200
+    )
 
 def forgot_password(params):
     """
-    Initiate forgot password flow.
+    Generate a link to Azure AD B2C password reset experience.
     
     Args:
-        params (dict): Parameters including email
+        params (dict): Parameters including redirect_uri
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response with password reset URL
     """
-    email = params.get('email')
+    redirect_uri = params.get('redirect_uri', '')
     
-    if not email:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Email is required'
-            })
-        }
-    
-    try:
-        # Initiate forgot password
-        cognito.forgot_password(
-            ClientId=CLIENT_ID,
-            Username=email
+    if not redirect_uri:
+        return func.HttpResponse(
+            json.dumps({
+                'message': 'Redirect URI is required'
+            }),
+            mimetype="application/json",
+            status_code=400
         )
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Password reset initiated. Please check your email for the confirmation code.'
-            })
-        }
-        
-    except cognito.exceptions.UserNotFoundException:
-        # For security reasons, still return a success message
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'If a user with this email exists, a password reset code has been sent.'
-            })
-        }
-        
-    except Exception as e:
-        logger.error(f"Error initiating forgot password: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error initiating forgot password: {str(e)}"
-            })
-        }
+    
+    # Generate a random state for CSRF protection
+    state = str(uuid.uuid4())
+    
+    # Build the password reset URL
+    reset_url = get_password_reset_endpoint()
+    query_params = {
+        'client_id': AAD_B2C_APPLICATION_ID,
+        'response_type': 'code',
+        'redirect_uri': redirect_uri,
+        'response_mode': 'query',
+        'scope': 'openid profile offline_access',
+        'state': state
+    }
+    
+    password_reset_url = f"{reset_url}?{urlencode(query_params)}"
+    
+    return func.HttpResponse(
+        json.dumps({
+            'message': 'Redirect to password reset experience',
+            'password_reset_url': password_reset_url,
+            'state': state
+        }),
+        mimetype="application/json",
+        status_code=200
+    )
 
 def confirm_forgot_password(params):
     """
-    Complete forgot password flow.
+    In Azure AD B2C, password reset confirmation is handled by the policy.
+    This is a placeholder function.
     
     Args:
-        params (dict): Parameters including email, confirmation_code, and new_password
+        params (dict): Parameters
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response
     """
-    email = params.get('email')
-    confirmation_code = params.get('confirmation_code')
-    new_password = params.get('new_password')
-    
-    if not email or not confirmation_code or not new_password:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Email, confirmation code, and new password are required'
-            })
-        }
-    
-    try:
-        # Confirm forgot password
-        cognito.confirm_forgot_password(
-            ClientId=CLIENT_ID,
-            Username=email,
-            ConfirmationCode=confirmation_code,
-            Password=new_password
-        )
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Password has been reset successfully.'
-            })
-        }
-        
-    except cognito.exceptions.CodeMismatchException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Invalid confirmation code.'
-            })
-        }
-        
-    except cognito.exceptions.ExpiredCodeException:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Confirmation code has expired.'
-            })
-        }
-        
-    except cognito.exceptions.InvalidPasswordException as e:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': str(e)
-            })
-        }
-        
-    except Exception as e:
-        logger.error(f"Error confirming forgot password: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error confirming forgot password: {str(e)}"
-            })
-        }
+    return func.HttpResponse(
+        json.dumps({
+            'message': 'Password reset confirmation is handled by Azure AD B2C policy'
+        }),
+        mimetype="application/json",
+        status_code=200
+    )
 
 def refresh_token(params):
     """
@@ -567,74 +355,56 @@ def refresh_token(params):
         params (dict): Parameters including refresh_token
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: Response with new tokens
     """
     refresh_token = params.get('refresh_token')
     
     if not refresh_token:
-        return {
-            'statusCode': 400,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
+        return func.HttpResponse(
+            json.dumps({
                 'message': 'Refresh token is required'
-            })
-        }
+            }),
+            mimetype="application/json",
+            status_code=400
+        )
+    
+    # Exchange refresh token for new tokens
+    token_endpoint = get_token_endpoint()
+    
+    token_data = {
+        'grant_type': 'refresh_token',
+        'client_id': AAD_B2C_APPLICATION_ID,
+        'refresh_token': refresh_token,
+        'scope': 'openid profile offline_access'
+    }
+    
+    # Add client secret if available (for confidential clients)
+    if AAD_B2C_CLIENT_SECRET:
+        token_data['client_secret'] = AAD_B2C_CLIENT_SECRET
     
     try:
-        # Refresh tokens
-        response = cognito.initiate_auth(
-            ClientId=CLIENT_ID,
-            AuthFlow='REFRESH_TOKEN_AUTH',
-            AuthParameters={
-                'REFRESH_TOKEN': refresh_token
-            }
+        response = requests.post(token_endpoint, data=token_data)
+        response.raise_for_status()
+        token_response = response.json()
+        
+        return func.HttpResponse(
+            json.dumps({
+                'message': 'Tokens refreshed successfully',
+                'access_token': token_response.get('access_token'),
+                'id_token': token_response.get('id_token'),
+                'refresh_token': token_response.get('refresh_token'),
+                'expires_in': token_response.get('expires_in'),
+                'token_type': token_response.get('token_type', 'Bearer')
+            }),
+            mimetype="application/json",
+            status_code=200
         )
-        
-        # Extract tokens
-        auth_result = response['AuthenticationResult']
-        access_token = auth_result.get('AccessToken')
-        id_token = auth_result.get('IdToken')
-        expires_in = auth_result.get('ExpiresIn', 3600)
-        
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Tokens refreshed successfully.',
-                'access_token': access_token,
-                'id_token': id_token,
-                'expires_in': expires_in,
-                'token_type': 'Bearer'
-            })
-        }
-        
-    except cognito.exceptions.NotAuthorizedException:
-        return {
-            'statusCode': 401,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': 'Refresh token is invalid or expired.'
-            })
-        }
-        
-    except Exception as e:
+    except requests.RequestException as e:
         logger.error(f"Error refreshing tokens: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
-                'message': f"Error refreshing tokens: {str(e)}"
-            })
-        }
+        return func.HttpResponse(
+            json.dumps({
+                'message': 'Refresh token is invalid or expired'
+            }),
+            mimetype="application/json",
+            status_code=401
+        )

@@ -1,4 +1,5 @@
-"""Test cases for the db_init Lambda function."""
+# src/tests/unit/test_db_init.py
+"""Test cases for the db_init Azure Function."""
 import json
 import os
 import socket
@@ -7,14 +8,14 @@ from unittest.mock import MagicMock, patch, call
 
 """Set up test environment."""
 # Set environment variables
-os.environ["DB_SECRET_ARN"] = "test-db-secret"
+os.environ["DB_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/db-credentials"
 os.environ["STAGE"] = "test"
 os.environ["MAX_RETRIES"] = "3"
 os.environ["RETRY_DELAY"] = "1"  # Short delay for tests
 
-# Now import the module under test - mocks are already in place globally from conftest
+# Now import the module under test
 from db_init.db_init import (
-    handler, get_postgres_credentials, check_dns_resolution,
+    main, get_postgres_credentials, check_dns_resolution,
     create_database_if_not_exists, initialize_database
 )
 

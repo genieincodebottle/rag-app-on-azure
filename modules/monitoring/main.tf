@@ -1,13 +1,17 @@
-# ================================================
-# Monitoring Module for RAG System (Logs & Alerts)
-# ================================================
-# Creates CloudWatch Log Groups, SNS Alerting, and Lambda Error Alarms
+# modules/monitoring/main.tf
 
-# ========================
+# ================================================
+# Monitoring Module for RAG System
+# ================================================
+
+# ==============================
 # Locals
-# ========================
+# ==============================
 
 locals {
+  name = "${var.project_name}-${var.stage}"
+  action_group_name = "${var.project_name}-${var.stage}-action-group"
+  
   common_tags = {
     Project     = var.project_name
     Environment = var.stage
@@ -15,110 +19,266 @@ locals {
   }
 }
 
-# ==========================================================
-# CloudWatch Log Groups for Lambda functions
-# ==========================================================
+# ==============================
+# Log Analytics Workspace
+# ==============================
 
-resource "aws_cloudwatch_log_group" "document_processor" {
-  name              = "/aws/lambda/${var.document_processor_name}"
-  retention_in_days = 30
+resource "azurerm_log_analytics_workspace" "main" {
+  name                = "${local.name}-law"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
   
-  tags = {
-    Name = "${var.project_name}-${var.stage}-document-processor-logs"
-  }
-}
-
-resource "aws_cloudwatch_log_group" "query_processor" {
-  name              = "/aws/lambda/${var.query_processor_name}"
-  retention_in_days = 30
-  
-  tags = {
-    Name = "${var.project_name}-${var.stage}-query-processor-logs"
-  }
-}
-
-resource "aws_cloudwatch_log_group" "upload_handler" {
-  name              = "/aws/lambda/${var.upload_handler_name}"
-  retention_in_days = 30
-  
-  tags = {
-    Name = "${var.project_name}-${var.stage}-upload-handler-logs"
-  }
-}
-
-# ==========================================================
-# CloudWatch Log Group for auth_handler Lambda
-# ==========================================================
-
-resource "aws_cloudwatch_log_group" "auth_handler" {
-  name              = "/aws/lambda/${var.auth_handler_name}"
-  retention_in_days = 30
-  
-  tags = {
-    Name = "${var.project_name}-${var.stage}-auth-handler-logs"
-  }
+  tags = local.common_tags
 }
 
 # ==============================
-# SNS Topic for Alerts
+# Action Group for Alerts
 # ==============================
 
-resource "aws_sns_topic" "alerts" {
-  name = "${var.project_name}-${var.stage}-alerts"
+resource "azurerm_monitor_action_group" "main" {
+  name                = local.action_group_name
+  resource_group_name = var.resource_group_name
+  short_name          = "ragalerts"
   
-  tags = {
-    Name = "${var.project_name}-${var.stage}-alerts"
+  email_receiver {
+    name                    = "admin"
+    email_address           = var.alert_email
+    use_common_alert_schema = true
   }
-}
-
-resource "aws_sns_topic_subscription" "email" {
-  topic_arn = aws_sns_topic.alerts.arn
-  protocol  = "email"
-  endpoint  = var.alert_email
+  
+  tags = local.common_tags
 }
 
 # ==============================
-# CloudWatch Alarms
+# Application Insights Alerts
 # ==============================
 
-resource "aws_cloudwatch_metric_alarm" "document_processor_errors" {
-  alarm_name          = "${var.project_name}-${var.stage}-document-processor-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 60
-  statistic           = "Sum"
-  threshold           = 3
-  alarm_description   = "This alarm monitors for errors in the document processor Lambda"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+resource "azurerm_monitor_metric_alert" "document_processor_errors" {
+  name                = "${local.name}-document-processor-errors"
+  resource_group_name = var.resource_group_name
+  scopes              = [var.document_processor_function_id]
+  description         = "Alert when document processor function has errors"
   
-  dimensions = {
-    FunctionName = var.document_processor_name
+  severity    = 2
+  frequency   = "PT5M"
+  window_size = "PT5M"
+  
+  criteria {
+    metric_namespace = "Microsoft.Web/sites"
+    metric_name      = "FunctionExecutionCount"
+    aggregation      = "Total"
+    operator         = "GreaterThan"
+    threshold        = 3
+    
+    dimension {
+      name     = "Status"
+      operator = "Include"
+      values   = ["Error"]
+    }
   }
   
-  tags = {
-    Name = "${var.project_name}-${var.stage}-document-processor-errors-alarm"
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
   }
+  
+  tags = local.common_tags
 }
 
-resource "aws_cloudwatch_metric_alarm" "query_processor_errors" {
-  alarm_name          = "${var.project_name}-${var.stage}-query-processor-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 60
-  statistic           = "Sum"
-  threshold           = 3
-  alarm_description   = "This alarm monitors for errors in the query processor Lambda"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
+resource "azurerm_monitor_metric_alert" "query_processor_errors" {
+  name                = "${local.name}-query-processor-errors"
+  resource_group_name = var.resource_group_name
+  scopes              = [var.query_processor_function_id]
+  description         = "Alert when query processor function has errors"
   
-  dimensions = {
-    FunctionName = var.query_processor_name
+  severity    = 2
+  frequency   = "PT5M"
+  window_size = "PT5M"
+  
+  criteria {
+    metric_namespace = "Microsoft.Web/sites"
+    metric_name      = "FunctionExecutionCount"
+    aggregation      = "Total"
+    operator         = "GreaterThan"
+    threshold        = 3
+    
+    dimension {
+      name     = "Status"
+      operator = "Include"
+      values   = ["Error"]
+    }
   }
   
-  tags = {
-    Name = "${var.project_name}-${var.stage}-query-processor-errors-alarm"
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
   }
+  
+  tags = local.common_tags
+}
+
+resource "azurerm_monitor_metric_alert" "upload_handler_errors" {
+  name                = "${local.name}-upload-handler-errors"
+  resource_group_name = var.resource_group_name
+  scopes              = [var.upload_handler_function_id]
+  description         = "Alert when upload handler function has errors"
+  
+  severity    = 2
+  frequency   = "PT5M"
+  window_size = "PT5M"
+  
+  criteria {
+    metric_namespace = "Microsoft.Web/sites"
+    metric_name      = "FunctionExecutionCount"
+    aggregation      = "Total"
+    operator         = "GreaterThan"
+    threshold        = 3
+    
+    dimension {
+      name     = "Status"
+      operator = "Include"
+      values   = ["Error"]
+    }
+  }
+  
+  action {
+    action_group_id = azurerm_monitor_action_group.main.id
+  }
+  
+  tags = local.common_tags
+}
+
+# ==============================
+# Azure Monitor Dashboard
+# ==============================
+
+resource "azurerm_dashboard" "main" {
+  name                = "${local.name}-dashboard"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  dashboard_properties = jsonencode({
+    "lenses": {
+      "0": {
+        "order": 0,
+        "parts": {
+          "0": {
+            "position": {
+              "x": 0,
+              "y": 0,
+              "colSpan": 6,
+              "rowSpan": 4
+            },
+            "metadata": {
+              "inputs": [
+                {
+                  "name": "resourceTypeMode",
+                  "value": "workspace"
+                },
+                {
+                  "name": "TimeRange",
+                  "value": "P1D"
+                },
+                {
+                  "name": "Dimensions",
+                  "value": {
+                    "xAxis": {
+                      "name": "TimeGenerated",
+                      "type": "datetime"
+                    },
+                    "yAxis": [
+                      {
+                        "name": "CountValue",
+                        "type": "long"
+                      }
+                    ],
+                    "splitBy": [
+                      {
+                        "name": "Level",
+                        "type": "string"
+                      }
+                    ],
+                    "aggregation": "Sum"
+                  }
+                },
+                {
+                  "name": "Query",
+                  "value": "AppTraces\n| where AppRoleName contains \"${var.project_name}\"\n| summarize CountValue = count() by bin(TimeGenerated, 5m), Level\n| render timechart"
+                },
+                {
+                  "name": "WorkspaceId",
+                  "value": "${azurerm_log_analytics_workspace.main.id}"
+                }
+              ],
+              "type": "Extension/AppInsightsExtension/PartType/AnalyticsLineChartPart",
+              "settings": {
+                "content": {
+                  "title": "Function Logs by Level",
+                  "subtitle": "Last 24 hours"
+                }
+              }
+            }
+          },
+          "1": {
+            "position": {
+              "x": 6,
+              "y": 0,
+              "colSpan": 6,
+              "rowSpan": 4
+            },
+            "metadata": {
+              "inputs": [
+                {
+                  "name": "resourceTypeMode",
+                  "value": "workspace"
+                },
+                {
+                  "name": "TimeRange",
+                  "value": "P1D"
+                },
+                {
+                  "name": "Dimensions",
+                  "value": {
+                    "xAxis": {
+                      "name": "TimeGenerated",
+                      "type": "datetime"
+                    },
+                    "yAxis": [
+                      {
+                        "name": "CountValue",
+                        "type": "long"
+                      }
+                    ],
+                    "splitBy": [
+                      {
+                        "name": "AppRoleName",
+                        "type": "string"
+                      }
+                    ],
+                    "aggregation": "Sum"
+                  }
+                },
+                {
+                  "name": "Query",
+                  "value": "AppRequests\n| where AppRoleName contains \"${var.project_name}\"\n| summarize CountValue = count() by bin(TimeGenerated, 5m), AppRoleName\n| render timechart"
+                },
+                {
+                  "name": "WorkspaceId",
+                  "value": "${azurerm_log_analytics_workspace.main.id}"
+                }
+              ],
+              "type": "Extension/AppInsightsExtension/PartType/AnalyticsLineChartPart",
+              "settings": {
+                "content": {
+                  "title": "Function Requests",
+                  "subtitle": "Last 24 hours"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  })
+  
+  tags = local.common_tags
 }

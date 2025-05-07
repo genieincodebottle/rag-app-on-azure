@@ -1,4 +1,5 @@
-#API Module
+# modules/api/variables.tf
+
 variable "project_name" {
   description = "Name of the project"
   type        = string
@@ -9,62 +10,115 @@ variable "stage" {
   type        = string
 }
 
-variable "aws_region" {
-  description = "AWS region for all resources"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "document_processor_arn" {
-  description = "ARN of the document processor Lambda function"
+variable "location" {
+  description = "Azure location"
   type        = string
 }
 
-variable "query_processor_arn" {
-  description = "ARN of the query processor Lambda function"
+variable "resource_group_name" {
+  description = "Name of the resource group"
   type        = string
 }
 
-variable "upload_handler_arn" {
-  description = "ARN of the upload handler Lambda function"
+variable "vnet_id" {
+  description = "ID of the Virtual Network"
   type        = string
 }
 
-variable "query_processor_name" {
-  description = "Name of the query processor Lambda function"
+variable "subnet_id" {
+  description = "ID of the subnet for API Management"
   type        = string
 }
 
-variable "upload_handler_name" {
-  description = "Name of the upload handler Lambda function"
+# Function IDs and names
+variable "document_processor_function_id" {
+  description = "ID of the document processor Function app"
   type        = string
 }
 
-variable "auth_handler_arn" {
-  description = "ARN of the auth handler Lambda function"
+variable "query_processor_function_id" {
+  description = "ID of the query processor Function app"
   type        = string
 }
 
-variable "auth_handler_name" {
-  description = "Name of the auth handler Lambda function"
+variable "upload_handler_function_id" {
+  description = "ID of the upload handler Function app"
   type        = string
 }
 
-variable "cognito_user_pool_id" {
-  description = "ID of the Cognito User Pool"
+variable "auth_handler_function_id" {
+  description = "ID of the auth handler Function app"
   type        = string
 }
 
-variable "cognito_app_client_id" {
-  description = "ID of the Cognito App Client"
+variable "document_processor_function_name" {
+  description = "Name of the document processor Function app"
   type        = string
+  default     = ""
 }
 
-variable "cognito_user_pool_arn" {
-  description = "ARN of the Cognito User Pool"
+variable "query_processor_function_name" {
+  description = "Name of the query processor Function app"
   type        = string
+  default     = ""
 }
 
-variable "cognito_domain" {
-  type = string
+variable "upload_handler_function_name" {
+  description = "Name of the upload handler Function app"
+  type        = string
+  default     = ""
+}
+
+variable "auth_handler_function_name" {
+  description = "Name of the auth handler Function app"
+  type        = string
+  default     = ""
+}
+
+# Function keys
+variable "document_processor_function_key" {
+  description = "Function key for document processor"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "query_processor_function_key" {
+  description = "Function key for query processor"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "upload_handler_function_key" {
+  description = "Function key for upload handler"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "auth_handler_function_key" {
+  description = "Function key for auth handler"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+# Auth configuration
+variable "aad_b2c_tenant_id" {
+  description = "Azure AD B2C Tenant ID"
+  type        = string
+  default     = ""
+}
+
+variable "aad_b2c_application_id" {
+  description = "Azure AD B2C Application ID"
+  type        = string
+  default     = ""
+}
+
+variable "aad_b2c_policy_name" {
+  description = "Azure AD B2C Policy Name"
+  type        = string
+  default     = ""
 }

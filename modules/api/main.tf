@@ -1,7 +1,9 @@
+# modules/api/main.tf
+
 # ================================
-# API Gateway Module for RAG App
+# API Management Module for RAG App
 # ================================
-# Defines REST API Gateway, resources, methods, integrations, CORS, deployment, and permissions
+# Defines API Management resources, APIs, operations, policies, CORS, and permissions
 
 # ====================================
 # Locals
@@ -18,481 +20,363 @@ locals {
 }
 
 # ====================================
-# REST API Gateway instead of HTTP API
+# API Management Service
 # ====================================
 
-resource "aws_api_gateway_rest_api" "main" {
-  name          = local.api_name
-  description   = "REST API with extended integration timeout"
+resource "azurerm_api_management" "main" {
+  name                = local.api_name
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  publisher_name      = "RAG App Team"
+  publisher_email     = "admin@example.com"
   
-  endpoint_configuration {
-    types = ["REGIONAL"]
+  # Choose SKU based on environment
+  sku_name = var.stage == "prod" ? "Premium_1" : "Developer_1"
+  
+  virtual_network_type = "Internal"
+  virtual_network_configuration {
+    subnet_id = var.subnet_id
   }
   
-  tags = {
-    Name = local.api_name
+  identity {
+    type = "SystemAssigned"
   }
   
-  # Don't replace existing API Gateway
+  tags = local.common_tags
+  
+  # Prevent destruction of existing API Management
   lifecycle {
     prevent_destroy = true
   }
 }
 
 # ====================================
-# CloudWatch log group for API Gateway
+# Application Insights for API Gateway
 # ====================================
 
-resource "aws_cloudwatch_log_group" "api_gateway" {
-  name              = "/aws/apigateway/${aws_api_gateway_rest_api.main.name}"
-  retention_in_days = 30
+resource "azurerm_application_insights" "api" {
+  name                = "${local.api_name}-insights"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  application_type    = "web"
   
   tags = {
-    Name = "${var.project_name}-${var.stage}-api-gateway-logs"
+    Name = "${var.project_name}-${var.stage}-api-insights"
   }
 }
 
-# JWT Authorizer for API Gateway
-resource "aws_api_gateway_authorizer" "jwt_authorizer" {
-  name          = "${var.project_name}-${var.stage}-jwt-authorizer"
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  type          = "COGNITO_USER_POOLS"
-  identity_source = "method.request.header.Authorization"
+resource "azurerm_api_management_logger" "main" {
+  name                = "${local.api_name}-logger"
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
   
-  # Configure JWT issuer and audience
-  provider_arns = [var.cognito_user_pool_arn]
-}
-
-# ====================================
-# Auth Resource and Method
-# ====================================
-
-resource "aws_api_gateway_resource" "auth" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  parent_id   = aws_api_gateway_rest_api.main.root_resource_id
-  path_part   = "auth"
-}
-
-resource "aws_api_gateway_method" "auth" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.auth.id
-  http_method   = "POST"
-  authorization = "NONE"  # Auth endpoint does not require authorization
-}
-
-resource "aws_api_gateway_integration" "auth" {
-  rest_api_id             = aws_api_gateway_rest_api.main.id
-  resource_id             = aws_api_gateway_resource.auth.id
-  http_method             = aws_api_gateway_method.auth.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${var.auth_handler_arn}/invocations"
-  timeout_milliseconds    = 30000  # 30 seconds timeout
-}
-
-resource "aws_api_gateway_method_response" "auth" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.auth.id
-  http_method = aws_api_gateway_method.auth.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "auth" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.auth.id
-  http_method = aws_api_gateway_method.auth.http_method
-  status_code = aws_api_gateway_method_response.auth.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.auth
-  ]
-}
-
-# ====================================
-# CORS Support for auth endpoint
-# ====================================
-
-resource "aws_api_gateway_method" "auth_options" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.auth.id
-  http_method   = "OPTIONS"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "auth_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.auth.id
-  http_method = aws_api_gateway_method.auth_options.http_method
-  type        = "MOCK"
-  
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
-}
-
-resource "aws_api_gateway_method_response" "auth_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.auth.id
-  http_method = aws_api_gateway_method.auth_options.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = true,
-    "method.response.header.Access-Control-Allow-Methods" = true,
-    "method.response.header.Access-Control-Allow-Origin"  = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "auth_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.auth.id
-  http_method = aws_api_gateway_method.auth_options.http_method
-  status_code = aws_api_gateway_method_response.auth_options.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'",
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.auth_options
-  ]
-}
-
-
-
-
-# ====================================
-# Query Resource and Method
-# ====================================
-
-resource "aws_api_gateway_resource" "query" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  parent_id   = aws_api_gateway_rest_api.main.root_resource_id
-  path_part   = "query"
-}
-
-resource "aws_api_gateway_method" "query" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.query.id
-  http_method   = "POST"
-  authorization = "COGNITO_USER_POOLS"
-  authorizer_id = aws_api_gateway_authorizer.jwt_authorizer.id
-}
-
-resource "aws_api_gateway_integration" "query" {
-  rest_api_id             = aws_api_gateway_rest_api.main.id
-  resource_id             = aws_api_gateway_resource.query.id
-  http_method             = aws_api_gateway_method.query.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${var.query_processor_arn}/invocations"
-  timeout_milliseconds    = 150000  # 3 minutes timeout
-}
-
-resource "aws_api_gateway_method_response" "query" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.query.id
-  http_method = aws_api_gateway_method.query.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "query" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.query.id
-  http_method = aws_api_gateway_method.query.http_method
-  status_code = aws_api_gateway_method_response.query.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.query
-  ]
-}
-
-# ====================================
-# Upload Resource and Method
-# ====================================
-
-resource "aws_api_gateway_resource" "upload" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  parent_id   = aws_api_gateway_rest_api.main.root_resource_id
-  path_part   = "upload"
-}
-
-resource "aws_api_gateway_method" "upload" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.upload.id
-  http_method   = "POST"
-  authorization = "COGNITO_USER_POOLS"
-  authorizer_id = aws_api_gateway_authorizer.jwt_authorizer.id
-}
-
-resource "aws_api_gateway_integration" "upload" {
-  rest_api_id             = aws_api_gateway_rest_api.main.id
-  resource_id             = aws_api_gateway_resource.upload.id
-  http_method             = aws_api_gateway_method.upload.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/${var.upload_handler_arn}/invocations"
-  timeout_milliseconds    = 150000  # 3 minutes timeout
-}
-
-resource "aws_api_gateway_method_response" "upload" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.upload.id
-  http_method = aws_api_gateway_method.upload.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "upload" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.upload.id
-  http_method = aws_api_gateway_method.upload.http_method
-  status_code = aws_api_gateway_method_response.upload.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Origin" = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.upload
-  ]
-}
-
-# ====================================
-# CORS Support
-# OPTIONS method for /query
-# ====================================
-
-resource "aws_api_gateway_method" "query_options" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.query.id
-  http_method   = "OPTIONS"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "query_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.query.id
-  http_method = aws_api_gateway_method.query_options.http_method
-  type        = "MOCK"
-  
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
-}
-
-resource "aws_api_gateway_method_response" "query_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.query.id
-  http_method = aws_api_gateway_method.query_options.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = true,
-    "method.response.header.Access-Control-Allow-Methods" = true,
-    "method.response.header.Access-Control-Allow-Origin"  = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "query_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.query.id
-  http_method = aws_api_gateway_method.query_options.http_method
-  status_code = aws_api_gateway_method_response.query_options.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'",
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.query_options
-  ]
-}
-
-# ====================================
-# OPTIONS method for /upload
-# ====================================
-
-resource "aws_api_gateway_method" "upload_options" {
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  resource_id   = aws_api_gateway_resource.upload.id
-  http_method   = "OPTIONS"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "upload_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.upload.id
-  http_method = aws_api_gateway_method.upload_options.http_method
-  type        = "MOCK"
-  
-  request_templates = {
-    "application/json" = "{\"statusCode\": 200}"
-  }
-}
-
-resource "aws_api_gateway_method_response" "upload_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.upload.id
-  http_method = aws_api_gateway_method.upload_options.http_method
-  status_code = "200"
-  
-  response_models = {
-    "application/json" = "Empty"
-  }
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = true,
-    "method.response.header.Access-Control-Allow-Methods" = true,
-    "method.response.header.Access-Control-Allow-Origin"  = true
-  }
-}
-
-resource "aws_api_gateway_integration_response" "upload_options" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  resource_id = aws_api_gateway_resource.upload.id
-  http_method = aws_api_gateway_method.upload_options.http_method
-  status_code = aws_api_gateway_method_response.upload_options.status_code
-  
-  response_parameters = {
-    "method.response.header.Access-Control-Allow-Headers" = "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
-    "method.response.header.Access-Control-Allow-Methods" = "'GET,POST,OPTIONS'",
-    "method.response.header.Access-Control-Allow-Origin"  = "'*'"
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.upload_options
-  ]
-}
-
-# ====================================
-# Deployment and Stage
-# ====================================
-
-resource "aws_api_gateway_deployment" "main" {
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  
-  triggers = {
-    # Original trigger configuration without health endpoint references
-    redeployment = sha1(jsonencode([
-      aws_api_gateway_resource.auth.id,
-      aws_api_gateway_resource.query.id,
-      aws_api_gateway_resource.upload.id,
-      aws_api_gateway_method.auth.id,
-      aws_api_gateway_method.query.id,
-      aws_api_gateway_method.upload.id,
-      aws_api_gateway_integration.auth.id,
-      aws_api_gateway_integration.query.id,
-      aws_api_gateway_integration.upload.id,
-    ]))
-  }
-  
-  lifecycle {
-    create_before_destroy = true
-  }
-  
-  depends_on = [
-    aws_api_gateway_integration.auth,
-    aws_api_gateway_integration.query,
-    aws_api_gateway_integration.upload,
-    aws_api_gateway_integration.auth_options,
-    aws_api_gateway_integration.query_options,
-    aws_api_gateway_integration.upload_options
-  ]
-}
-
-resource "aws_api_gateway_stage" "main" {
-  deployment_id = aws_api_gateway_deployment.main.id
-  rest_api_id   = aws_api_gateway_rest_api.main.id
-  stage_name    = var.stage
-  
-  access_log_settings {
-    destination_arn = aws_cloudwatch_log_group.api_gateway.arn
-    format = jsonencode({
-      requestId              = "$context.requestId"
-      ip                     = "$context.identity.sourceIp"
-      requestTime            = "$context.requestTime"
-      httpMethod             = "$context.httpMethod"
-      routeKey               = "$context.resourcePath"
-      status                 = "$context.status"
-      protocol               = "$context.protocol"
-      responseLength         = "$context.responseLength"
-      integrationErrorMessage = "$context.integrationErrorMessage"
-    })
-  }
-  
-  tags = {
-    Name = "${var.project_name}-${var.stage}-stage"
+  application_insights {
+    instrumentation_key = azurerm_application_insights.api.instrumentation_key
   }
 }
 
 # ====================================
-# Lambda permissions
+# API Management API
 # ====================================
 
-resource "aws_lambda_permission" "api_gateway_query" {
-  statement_id  = "AllowAPIGatewayInvokeQuery"
-  action        = "lambda:InvokeFunction"
-  function_name = var.query_processor_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.main.execution_arn}/*/${aws_api_gateway_method.query.http_method}${aws_api_gateway_resource.query.path}"
+resource "azurerm_api_management_api" "main" {
+  name                = "${var.project_name}-api"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  revision            = "1"
+  display_name        = "${var.project_name} API"
+  path                = var.stage
+  protocols           = ["https"]
+  
+  subscription_required = false
 }
 
-resource "aws_lambda_permission" "api_gateway_upload" {
-  statement_id  = "AllowAPIGatewayInvokeUpload"
-  action        = "lambda:InvokeFunction"
-  function_name = var.upload_handler_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.main.execution_arn}/*/${aws_api_gateway_method.upload.http_method}${aws_api_gateway_resource.upload.path}"
+# ====================================
+# JWT Validation Policy for API Management
+# ====================================
+
+resource "azurerm_api_management_api_policy" "jwt_validation" {
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <cors>
+      <allowed-origins>
+        <origin>*</origin>
+      </allowed-origins>
+      <allowed-methods>
+        <method>GET</method>
+        <method>POST</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>Content-Type</header>
+        <header>Authorization</header>
+      </allowed-headers>
+    </cors>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
+XML
 }
 
-resource "aws_lambda_permission" "api_gateway_auth" {
-  statement_id  = "AllowAPIGatewayInvokeAuth"
-  action        = "lambda:InvokeFunction"
-  function_name = var.auth_handler_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.main.execution_arn}/*/${aws_api_gateway_method.auth.http_method}${aws_api_gateway_resource.auth.path}"
+# ====================================
+# Auth operation
+# ====================================
+
+resource "azurerm_api_management_api_operation" "auth" {
+  operation_id        = "auth"
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  display_name        = "Authentication"
+  method              = "POST"
+  url_template        = "/auth"
+  description         = "Authentication operations"
+  
+  response {
+    status_code = 200
+  }
+}
+
+resource "azurerm_api_management_api_operation_policy" "auth" {
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  operation_id        = azurerm_api_management_api_operation.auth.operation_id
+  
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <cors>
+      <allowed-origins>
+        <origin>*</origin>
+      </allowed-origins>
+      <allowed-methods>
+        <method>POST</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>Content-Type</header>
+        <header>Authorization</header>
+      </allowed-headers>
+    </cors>
+    <set-backend-service id="apim-generated-policy" backend-id="auth-function" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
+XML
+}
+
+# ====================================
+# Query operation
+# ====================================
+
+resource "azurerm_api_management_api_operation" "query" {
+  operation_id        = "query"
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  display_name        = "Query"
+  method              = "POST"
+  url_template        = "/query"
+  description         = "Query the RAG system"
+  
+  response {
+    status_code = 200
+  }
+}
+
+resource "azurerm_api_management_api_operation_policy" "query" {
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  operation_id        = azurerm_api_management_api_operation.query.operation_id
+  
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <cors>
+      <allowed-origins>
+        <origin>*</origin>
+      </allowed-origins>
+      <allowed-methods>
+        <method>POST</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>Content-Type</header>
+        <header>Authorization</header>
+      </allowed-headers>
+    </cors>
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+      <openid-config url="https://login.microsoftonline.com/${var.aad_b2c_tenant_id}/v2.0/.well-known/openid-configuration?p=${var.aad_b2c_policy_name}" />
+      <required-claims>
+        <claim name="aud">
+          <value>${var.aad_b2c_application_id}</value>
+        </claim>
+      </required-claims>
+    </validate-jwt>
+    <set-backend-service id="apim-generated-policy" backend-id="query-function" />
+    <set-header name="x-functions-key" exists-action="override">
+      <value>{{query-function-key}}</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
+XML
+}
+
+# ====================================
+# Upload operation
+# ====================================
+
+resource "azurerm_api_management_api_operation" "upload" {
+  operation_id        = "upload"
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  display_name        = "Upload"
+  method              = "POST"
+   url_template        = "/upload"
+  description         = "Upload documents to the RAG system"
+  
+  response {
+    status_code = 200
+  }
+}
+
+resource "azurerm_api_management_api_operation_policy" "upload" {
+  api_name            = azurerm_api_management_api.main.name
+  api_management_name = azurerm_api_management.main.name
+  resource_group_name = var.resource_group_name
+  operation_id        = azurerm_api_management_api_operation.upload.operation_id
+  
+  xml_content = <<XML
+<policies>
+  <inbound>
+    <base />
+    <cors>
+      <allowed-origins>
+        <origin>*</origin>
+      </allowed-origins>
+      <allowed-methods>
+        <method>POST</method>
+        <method>OPTIONS</method>
+      </allowed-methods>
+      <allowed-headers>
+        <header>Content-Type</header>
+        <header>Authorization</header>
+      </allowed-headers>
+    </cors>
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+      <openid-config url="https://login.microsoftonline.com/${var.aad_b2c_tenant_id}/v2.0/.well-known/openid-configuration?p=${var.aad_b2c_policy_name}" />
+      <required-claims>
+        <claim name="aud">
+          <value>${var.aad_b2c_application_id}</value>
+        </claim>
+      </required-claims>
+    </validate-jwt>
+    <set-backend-service id="apim-generated-policy" backend-id="upload-function" />
+    <set-header name="x-functions-key" exists-action="override">
+      <value>{{upload-function-key}}</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>
+XML
+}
+
+# ====================================
+# Function Backends for API Management
+# ====================================
+
+resource "azurerm_api_management_backend" "auth_function" {
+  name                = "auth-function"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  protocol            = "http"
+  url                 = "https://${var.auth_handler_function_name}.azurewebsites.net/api/auth_handler"
+  
+  credentials {
+    header = {
+      "x-functions-key" = var.auth_handler_function_key
+    }
+  }
+}
+
+resource "azurerm_api_management_backend" "query_function" {
+  name                = "query-function"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  protocol            = "http"
+  url                 = "https://${var.query_processor_function_name}.azurewebsites.net/api/query_processor"
+}
+
+resource "azurerm_api_management_backend" "upload_function" {
+  name                = "upload-function"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  protocol            = "http"
+  url                 = "https://${var.upload_handler_function_name}.azurewebsites.net/api/upload_handler"
+}
+
+# ====================================
+# APIM Named Values for Function Keys
+# ====================================
+
+resource "azurerm_api_management_named_value" "query_function_key" {
+  name                = "query-function-key"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  display_name        = "query-function-key"
+  value               = var.query_processor_function_key
+  secret              = true
+}
+
+resource "azurerm_api_management_named_value" "upload_function_key" {
+  name                = "upload-function-key"
+  resource_group_name = var.resource_group_name
+  api_management_name = azurerm_api_management.main.name
+  display_name        = "upload-function-key"
+  value               = var.upload_handler_function_key
+  secret              = true
 }

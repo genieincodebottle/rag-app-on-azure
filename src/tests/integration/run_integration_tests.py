@@ -1,3 +1,4 @@
+# src/tests/integration/run_integration_tests.py
 import os
 import sys
 import json
@@ -11,7 +12,7 @@ def log(message):
     """Log a message with timestamp."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
-
+    
 def write_junit_xml(tests, output_file="integration-test-results.xml"):
     """Write test results in JUnit XML format."""
     template = """<?xml version="1.0" encoding="utf-8"?>

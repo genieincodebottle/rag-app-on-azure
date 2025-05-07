@@ -1,6 +1,7 @@
-#Compute Module
+# modules/compute/variables.tf
+
 # =========================
-# Lambda Module Variables
+# Compute Module Variables
 # =========================
 
 variable "project_name" {
@@ -13,66 +14,93 @@ variable "stage" {
   type        = string
 }
 
-variable "aws_region" {
-  description = "AWS region for all resources"
+variable "location" {
+  description = "Azure location"
   type        = string
-  default     = "us-east-1"
+}
+
+variable "resource_group_name" {
+  description = "Name of the resource group"
+  type        = string
 }
 
 # -------------------------
-# Lambda Configuration
+# Function Configuration
 # -------------------------
-variable "lambda_memory_size" {
-  description = "Memory size for Lambda functions in MB"
+variable "function_memory_size" {
+  description = "Memory size for Function apps in MB"
   type        = number
-  default     = 256
+  default     = 1536
 }
 
-variable "lambda_timeout" {
-  description = "Timeout for Lambda functions in seconds"
+variable "function_timeout" {
+  description = "Timeout for Function apps in seconds"
   type        = number
-  default     = 30
+  default     = 120
 }
 
 # -------------------------
 # Storage & Metadata
 # -------------------------
-variable "documents_bucket" {
-  description = "Name of the S3 bucket for documents"
+variable "documents_container" {
+  description = "Name of the blob container for documents"
   type        = string
 }
 
-variable "metadata_table" {
-  description = "Name of the DynamoDB table for metadata"
+variable "documents_storage_account" {
+  description = "Name of the storage account for documents"
+  type        = string
+}
+
+variable "metadata_cosmos_account" {
+  description = "Name of the Cosmos DB account for metadata"
+  type        = string
+}
+
+variable "metadata_cosmos_database" {
+  description = "Name of the Cosmos DB database for metadata"
+  type        = string
+}
+
+variable "metadata_cosmos_container" {
+  description = "Name of the Cosmos DB container for metadata"
+  type        = string
+}
+
+variable "function_storage_account" {
+  description = "Name of the storage account for function code"
   type        = string
 }
 
 # -------------------------
-# Networking Configuration
+# Networking
 # -------------------------
-variable "vpc_subnet_ids" {
-  description = "List of subnet IDs for Lambda functions"
-  type        = list(string)
-  default     = []
+variable "vnet_id" {
+  description = "ID of the Virtual Network"
+  type        = string
 }
 
-variable "lambda_security_group_id" {
-  description = "ID of the security group for Lambda functions"
+variable "subnet_id" {
+  description = "ID of the subnet for functions"
+  type        = string
+}
+
+# -------------------------
+# Key Vault
+# -------------------------
+variable "key_vault_id" {
+  description = "ID of the Key Vault"
+  type        = string
+}
+
+variable "key_vault_name" {
+  description = "Name of the Key Vault"
   type        = string
   default     = ""
 }
 
-# -------------------------
-# Secrets and Lambda Code
-# -------------------------
-variable "db_secret_arn" {
-  description = "ARN of the Secrets Manager secret containing database credentials"
-  type        = string
-  default     = ""
-}
-
-variable "lambda_code_bucket" {
-  description = "Name of the S3 bucket for Lambda code"
+variable "db_secret_uri" {
+  description = "URI of the DB credentials secret in Key Vault"
   type        = string
 }
 
@@ -95,6 +123,7 @@ variable "gemini_api_key" {
   description = "Google's Gemini API Key"
   type        = string
   default     = "PLACE_HOLDER"
+  sensitive   = true
 }
 
 variable "max_retries" {
@@ -109,20 +138,17 @@ variable "retry_delay" {
   default     = 10
 }
 
-variable "cognito_user_pool_id" {
-  description = "ID of the Cognito User Pool"
+# -------------------------
+# Auth Configuration
+# -------------------------
+variable "aad_b2c_tenant_id" {
+  description = "Azure AD B2C Tenant ID"
   type        = string
   default     = ""
 }
 
-variable "cognito_app_client_id" {
-  description = "ID of the Cognito App Client"
-  type        = string
-  default     = ""
-}
-
-variable "cognito_user_pool_arn" {
-  description = "ARN of the Cognito User Pool"
+variable "aad_b2c_application_id" {
+  description = "Azure AD B2C Application ID"
   type        = string
   default     = ""
 }

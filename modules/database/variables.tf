@@ -1,4 +1,5 @@
-# Database Module variables.tf
+# modules/database/variables.tf
+
 variable "project_name" {
   description = "Name of the project"
   type        = string
@@ -9,38 +10,30 @@ variable "stage" {
   type        = string
 }
 
-variable "aws_region" {
-  description = "AWS region for all resources"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "db_subnet_group_name" {
-  description = "Name of the DB subnet group"
+variable "location" {
+  description = "Azure location"
   type        = string
 }
 
-variable "db_security_group_id" {
-  description = "ID of the security group for the database"
+variable "resource_group_name" {
+  description = "Name of the resource group"
   type        = string
 }
 
-variable "db_instance_class" {
-  description = "Instance class for the RDS instance"
+variable "vnet_id" {
+  description = "ID of the Virtual Network"
   type        = string
-  default     = "db.t3.micro"
 }
 
-variable "db_allocated_storage" {
-  description = "Allocated storage for the RDS instance in GiB"
-  type        = number
-  default     = 20
+variable "subnet_id" {
+  description = "ID of the subnet for the database"
+  type        = string
 }
 
-variable "db_engine_version" {
-  description = "Engine version for PostgreSQL"
+variable "admin_username" {
+  description = "Admin username for the PostgreSQL server"
   type        = string
-  default     = "15"
+  default     = "pgadmin"
 }
 
 variable "db_name" {
@@ -49,22 +42,16 @@ variable "db_name" {
   default     = "ragapp"
 }
 
-variable "db_username" {
-  description = "Username for the database"
+variable "db_sku_name" {
+  description = "SKU name for the PostgreSQL Flexible Server"
   type        = string
-  default     = "ragadmin"
+  default     = "B_Standard_B1ms"
 }
 
-variable "skip_final_snapshot" {
-  description = "Whether to skip the final snapshot when the database is deleted"
-  type        = bool
-  default     = true
-}
-
-variable "import_db" {
-  description = "Whether to import existing database"
-  type        = bool
-  default     = false
+variable "db_storage_mb" {
+  description = "Storage for the PostgreSQL server in MB"
+  type        = number
+  default     = 5120 # 5GB
 }
 
 variable "reset_db_password" {

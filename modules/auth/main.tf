@@ -1,74 +1,52 @@
-# /modules/auth/main.tf
-resource "aws_cognito_user_pool" "main" {
-  name = "${var.project_name}-${var.stage}-user-pool"
-  
-  # Password policy
-  password_policy {
-    minimum_length    = 8
-    require_lowercase = true
-    require_numbers   = true
-    require_symbols   = true
-    require_uppercase = true
-  }
-  
-  # Auto-verification of email
-  verification_message_template {
-    default_email_option = "CONFIRM_WITH_CODE"
-  }
+# modules/auth/main.tf
 
-  email_configuration {
-    email_sending_account = "COGNITO_DEFAULT"
-  }
+# =========================
+# Auth Module for RAG System
+# =========================
+# Sets up Azure AD B2C for user authentication
 
-  # Enable username attributes
-  username_attributes = ["email"]
+locals {
+  name = "${var.project_name}-${var.stage}"
+}
 
-  auto_verified_attributes = ["email"]
+# Azure AD B2C resource (we mock this since Azure AD B2C cannot be fully automated with Terraform)
+# In a real implementation, you would manually create the B2C tenant and use data sources
+resource "azurerm_resource_group" "b2c" {
+  name     = "${local.name}-b2c-rg"
+  location = var.location
   
-  # Schema attributes
-  schema {
-    name                = "email"
-    attribute_data_type = "String"
-    mutable             = true
-    required            = true
-  }
-  
-  # MFA configuration
-  mfa_configuration = "OFF"
-  
-  lifecycle {
-    ignore_changes = [schema]
+  tags = {
+    Environment = var.stage
+    Project     = var.project_name
   }
 }
 
-resource "aws_cognito_user_pool_domain" "main" {
-  domain       = "${var.project_name}-${var.stage}-auth"
-  user_pool_id = aws_cognito_user_pool.main.id
-}
-
-# App client for frontend application
-resource "aws_cognito_user_pool_client" "streamlit_client" {
-  name                   = "${var.project_name}-${var.stage}-streamlit-client"
-  user_pool_id           = aws_cognito_user_pool.main.id
-  generate_secret        = false
-  refresh_token_validity = 30
-  access_token_validity  = 1
-  id_token_validity      = 1
-  
-  # Explicitly set allowed OAuth flows and scopes
-  allowed_oauth_flows                  = ["implicit"]
-  allowed_oauth_flows_user_pool_client = true
-  allowed_oauth_scopes                 = ["email", "openid", "profile"]
-  
-  # Add explicit auth flows to enable USER_PASSWORD_AUTH
-  explicit_auth_flows = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"]
-
-  callback_urls = ["http://localhost:8501/"]
-  logout_urls   = ["http://localhost:8501/"]
-  
-  token_validity_units {
-    access_token  = "hours"
-    id_token      = "hours"
-    refresh_token = "days"
+# Mock Azure AD B2C configuration - replace with real data sources in production
+# These are placeholder values - the actual setup would use azuread provider
+resource "null_resource" "b2c_tenant" {
+  triggers = {
+    # These would be actual outputs if using azuread provider
+    tenant_id = "b2c-${local.name}-${var.location}-tenant-id"
+    domain_name = "${local.name}.onmicrosoft.com"
   }
 }
+
+resource "null_resource" "b2c_application" {
+  triggers = {
+    application_id = "b2c-${local.name}-${var.location}-app-id" 
+    app_name = "${local.name}-app"
+  }
+  
+  depends_on = [null_resource.b2c_tenant]
+}
+
+resource "null_resource" "b2c_policy" {
+  triggers = {
+    policy_name = "B2C_1_SignUpSignIn"
+  }
+  
+  depends_on = [null_resource.b2c_application]
+}
+
+# In a real implementation, you would configure redirect URIs, app settings, etc.
+# For demonstration, we'll just output values that would be used by other modules

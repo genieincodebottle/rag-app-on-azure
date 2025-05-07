@@ -1,45 +1,58 @@
+# src/upload_handler/upload_handler.py
+
 """
-Lambda function to handle document uploads.
+Azure Function to handle document uploads.
 """
 import os
 import json
-import boto3
 import logging
+import azure.functions as func
 import uuid
 import base64
 import psycopg2
 from datetime import datetime
 
+# Azure SDK imports
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+from azure.storage.blob import BlobServiceClient
+from azure.cosmos import CosmosClient, PartitionKey
+
 # Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
-# Initialize AWS clients
-s3_client = boto3.client('s3')
-dynamodb = boto3.resource('dynamodb')
-secretsmanager = boto3.client('secretsmanager')
-lambda_client = boto3.client('lambda')
-
-# Get environment variables
-DOCUMENTS_BUCKET = os.environ.get('DOCUMENTS_BUCKET')
-METADATA_TABLE = os.environ.get('METADATA_TABLE')
-DB_SECRET_ARN = os.environ.get('DB_SECRET_ARN')
+# Environment variables
+DOCUMENTS_CONTAINER = os.environ.get('DOCUMENTS_CONTAINER')
+DOCUMENTS_STORAGE = os.environ.get('DOCUMENTS_STORAGE')
+METADATA_COSMOS_ACCOUNT = os.environ.get('METADATA_COSMOS_ACCOUNT')
+METADATA_COSMOS_DATABASE = os.environ.get('METADATA_COSMOS_DATABASE')
+METADATA_CONTAINER = os.environ.get('METADATA_CONTAINER')
 STAGE = os.environ.get('STAGE')
+DB_SECRET_URI = os.environ.get('DB_SECRET_URI')
+
+# Initialize Azure clients
+credential = DefaultAzureCredential()
 
 def get_postgres_credentials():
     """
-    Get PostgreSQL credentials from Secrets Manager.
+    Get PostgreSQL credentials from Azure Key Vault.
     """
     try:
-        secret_response = secretsmanager.get_secret_value(
-            SecretId=DB_SECRET_ARN
-        )
-        secret = json.loads(secret_response['SecretString'])
-        return secret
+        # Parse URI to get Key Vault name and secret name
+        parts = DB_SECRET_URI.replace("https://", "").split('/')
+        key_vault_name = parts[0].split('.')[0]
+        secret_name = parts[-1]
+        
+        # Create a SecretClient
+        secret_client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+        
+        # Get the secret
+        secret = secret_client.get_secret(secret_name)
+        return json.loads(secret.value)
     except Exception as e:
         logger.error(f"Error getting PostgreSQL credentials: {str(e)}")
         raise e
-
 
 def get_postgres_connection(credentials):
     """
@@ -53,7 +66,6 @@ def get_postgres_connection(credentials):
         dbname=credentials['dbname']
     )
     return conn
-
 
 def get_mime_type(file_name):
     """
@@ -79,63 +91,47 @@ def get_mime_type(file_name):
     }
     return mime_types.get(file_extension, 'application/octet-stream')
 
-
-def handler(event, context):
+def main(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Lambda function to handle document uploads.
+    Azure Function to handle document uploads.
     
     Args:
-        event (dict): API Gateway event containing upload details
-        context (object): Lambda context
+        req (func.HttpRequest): HTTP request
         
     Returns:
-        dict: Response with status code and body
+        func.HttpResponse: HTTP response
     """
-    logger.info(f"Received event: {json.dumps(event)}")
+    logger.info('Upload handler function processed a request.')
     
     try:
-         # Extract body from the request for API Gateway calls
-        body = {}
-        if 'body' in event:
-            if isinstance(event.get('body'), str) and event.get('body'):
-                try:
-                    body = json.loads(event['body'])
-                except json.JSONDecodeError:
-                    body = {}
-            elif isinstance(event.get('body'), dict):
-                body = event.get('body')
-                
+        # Parse request body
+        req_body = req.get_json()
+        
         # Check if this is a health check request
-        if event.get('action') == 'healthcheck' or body.get('action') == 'healthcheck':
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
+        if req_body.get('action') == 'healthcheck':
+            return func.HttpResponse(
+                json.dumps({
                     'message': 'Upload handler is healthy',
                     'stage': STAGE
-                })
-            }
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
         
         # Extract file data and metadata
-        file_content_base64 = body.get('file_content', '')
-        file_name = body.get('file_name', '')
-        mime_type = body.get('mime_type', None)
-        user_id = body.get('user_id', 'system')
+        file_content_base64 = req_body.get('file_content', '')
+        file_name = req_body.get('file_name', '')
+        mime_type = req_body.get('mime_type', None)
+        user_id = req_body.get('user_id', 'system')
         
         if not file_content_base64 or not file_name:
-            return {
-                'statusCode': 400,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
+            return func.HttpResponse(
+                json.dumps({
                     'message': 'File content and name are required'
-                })
-            }
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
         
         # Determine MIME type if not provided
         if not mime_type:
@@ -147,14 +143,21 @@ def handler(event, context):
         # Generate a unique document ID
         document_id = str(uuid.uuid4())
         
-        # Upload file to S3
-        s3_key = f"uploads/{user_id}/{document_id}/{file_name}"
-        s3_client.put_object(
-            Bucket=DOCUMENTS_BUCKET,
-            Key=s3_key,
-            Body=file_content,
-            ContentType=mime_type
+        # Upload file to Blob Storage
+        blob_path = f"uploads/{user_id}/{document_id}/{file_name}"
+        
+        # Initialize blob client
+        blob_service_client = BlobServiceClient(
+            account_url=f"https://{DOCUMENTS_STORAGE}.blob.core.windows.net",
+            credential=credential
         )
+        container_client = blob_service_client.get_container_client(DOCUMENTS_CONTAINER)
+        blob_client = container_client.get_blob_client(blob_path)
+        
+        # Upload blob
+        blob_client.upload_blob(file_content, overwrite=True, content_settings={
+            "content_type": mime_type
+        })
         
         # Store initial metadata in PostgreSQL
         try:
@@ -173,8 +176,8 @@ def handler(event, context):
                 file_name,
                 mime_type,
                 'uploaded',
-                DOCUMENTS_BUCKET,
-                s3_key,
+                DOCUMENTS_CONTAINER,
+                blob_path,
                 datetime.now(),
                 datetime.now()
             ))
@@ -186,48 +189,55 @@ def handler(event, context):
             
         except Exception as e:
             logger.error(f"Error storing metadata in PostgreSQL: {str(e)}")
-            # Continue with DynamoDB as fallback
+            # Continue with Cosmos DB as fallback
         
-        # Store metadata in DynamoDB
-        metadata_table = dynamodb.Table(METADATA_TABLE)
-        metadata_table.put_item(
-            Item={
+        # Store metadata in Cosmos DB
+        try:
+            # Initialize Cosmos DB client
+            cosmos_client = CosmosClient(
+                url=f"https://{METADATA_COSMOS_ACCOUNT}.documents.azure.com:443/",
+                credential=credential
+            )
+            database = cosmos_client.get_database_client(METADATA_COSMOS_DATABASE)
+            container = database.get_container_client(METADATA_CONTAINER)
+            
+            # Store metadata
+            metadata_item = {
                 'id': f"doc#{document_id}",
                 'document_id': document_id,
                 'user_id': user_id,
                 'file_name': file_name,
                 'mime_type': mime_type,
                 'status': 'uploaded',
-                'bucket': DOCUMENTS_BUCKET,
-                'key': s3_key,
-                'created_at': int(datetime.now().timestamp() * 1000),
-                'updated_at': int(datetime.now().timestamp() * 1000)
+                'container': DOCUMENTS_CONTAINER,
+                'path': blob_path,
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
             }
-        )
+            
+            container.create_item(body=metadata_item)
+            
+        except Exception as e:
+            logger.error(f"Error storing metadata in Cosmos DB: {str(e)}")
+            # Continue since we already stored in PostgreSQL
         
         # Return success response
-        return {
-            'statusCode': 200,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
+        return func.HttpResponse(
+            json.dumps({
                 'message': 'File uploaded successfully',
                 'document_id': document_id,
                 'file_name': file_name
-            })
-        }
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
         
     except Exception as e:
         logger.error(f"Error uploading file: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*'
-            },
-            'body': json.dumps({
+        return func.HttpResponse(
+            json.dumps({
                 'message': f"Error uploading file: {str(e)}"
-            })
-        }
+            }),
+            mimetype="application/json",
+            status_code=500
+        )

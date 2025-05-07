@@ -1,17 +1,21 @@
 """
-Lambda function to process documents uploaded to S3.
+Azure Function to process documents uploaded to Blob Storage.
 Extracts text from documents, chunks it, creates embeddings, and stores in PostgreSQL.
 """
 import os
 import json
-import boto3
 import logging
 import tempfile
 import psycopg2
 import uuid
-import urllib.parse
+import azure.functions as func
 from datetime import datetime
 from typing import List, Tuple
+
+from azure.storage.blob import BlobServiceClient
+from azure.cosmos import CosmosClient
+from azure.keyvault.secrets import SecretClient
+from azure.identity import DefaultAzureCredential
 
 # Import LangChain components
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader

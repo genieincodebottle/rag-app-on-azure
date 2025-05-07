@@ -1,48 +1,69 @@
+# src/query_processor/query_processor.py
+
 """
-Lambda function to process queries and retrieve relevant documents using RAG.
+Azure Function to process queries and retrieve relevant documents using RAG.
 """
 import os
 import json
-import boto3
 import logging
-import psycopg2
+import azure.functions as func
 from typing import List, Dict, Any
 from decimal import Decimal
+
+# Azure SDK imports
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+from azure.storage.blob import BlobServiceClient
+from azure.cosmos import CosmosClient, PartitionKey
+import psycopg2
+
+# Gemini AI imports
 from google import genai
 from google.genai import types
 
-# Logger setup
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# AWS clients
-s3_client = boto3.client('s3')
-dynamodb = boto3.resource('dynamodb')
-secretsmanager = boto3.client('secretsmanager')
 
 # Environment variables
-DOCUMENTS_BUCKET = os.environ.get('DOCUMENTS_BUCKET')
-METADATA_TABLE = os.environ.get('METADATA_TABLE')
+DOCUMENTS_CONTAINER = os.environ.get('DOCUMENTS_CONTAINER')
+DOCUMENTS_STORAGE = os.environ.get('DOCUMENTS_STORAGE')
+METADATA_COSMOS_ACCOUNT = os.environ.get('METADATA_COSMOS_ACCOUNT') 
+METADATA_COSMOS_DATABASE = os.environ.get('METADATA_COSMOS_DATABASE')
+METADATA_CONTAINER = os.environ.get('METADATA_CONTAINER')
 STAGE = os.environ.get('STAGE')
-DB_SECRET_ARN = os.environ.get('DB_SECRET_ARN')
-GEMINI_SECRET_ARN = os.environ.get('GEMINI_SECRET_ARN')
+DB_SECRET_URI = os.environ.get('DB_SECRET_URI')
+GEMINI_SECRET_URI = os.environ.get('GEMINI_SECRET_URI')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL')
 GEMINI_EMBEDDING_MODEL = os.environ.get('GEMINI_EMBEDDING_MODEL')
-TEMPERATURE = float(os.environ.get('TEMPERATURE'))
-MAX_OUTPUT_TOKENS = int(os.environ.get('MAX_OUTPUT_TOKENS'))
-TOP_K = int(os.environ.get('TOP_K'))
-TOP_P = float(os.environ.get('TOP_P'))
+TEMPERATURE = float(os.environ.get('TEMPERATURE', 0.2))
+MAX_OUTPUT_TOKENS = int(os.environ.get('MAX_OUTPUT_TOKENS', 1024))
+TOP_K = int(os.environ.get('TOP_K', 40))
+TOP_P = float(os.environ.get('TOP_P', 0.8))
 
-# Get Gemini API key from Secrets Manager
+# Initialize Azure clients
+credential = DefaultAzureCredential()
+
+# Get Gemini API key from Key Vault
 def get_gemini_api_key():
     try:
-        response = secretsmanager.get_secret_value(SecretId=GEMINI_SECRET_ARN)
-        return json.loads(response['SecretString'])['GEMINI_API_KEY']
+        # Parse URI to get Key Vault name and secret name
+        parts = GEMINI_SECRET_URI.replace("https://", "").split('/')
+        key_vault_name = parts[0].split('.')[0]
+        secret_name = parts[-1]
+        
+        # Create a SecretClient
+        secret_client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+        
+        # Get the secret
+        secret = secret_client.get_secret(secret_name)
+        credentials = json.loads(secret.value)
+        return credentials['GEMINI_API_KEY']
     except Exception as e:
-        logger.error(f"Error fetching Gemini API key: {str(e)}")
-        raise
+        logger.error(f"Error getting Gemini API key: {str(e)}")
+        raise e
 
-# Gemini client
+# Initialize Gemini client
 try:
     GEMINI_API_KEY = get_gemini_api_key()
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -50,7 +71,7 @@ except Exception as e:
     logger.error(f"Error configuring Gemini API client: {str(e)}")
     raise
 
-# Convert Decimal in DynamoDB
+# Convert Decimal in Cosmos DB
 class DecimalEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, Decimal):
@@ -74,14 +95,23 @@ def embed_query(text: str) -> List[float]:
 def embed_documents(texts: List[str]) -> List[List[float]]:
     return [embed_query(text) for text in texts]
 
-# Get RDS credentials from Secrets Manager
+# Get PostgreSQL credentials from Key Vault
 def get_postgres_credentials():
     try:
-        response = secretsmanager.get_secret_value(SecretId=DB_SECRET_ARN)
-        return json.loads(response['SecretString'])
+        # Parse URI to get Key Vault name and secret name
+        parts = DB_SECRET_URI.replace("https://", "").split('/')
+        key_vault_name = parts[0].split('.')[0]
+        secret_name = parts[-1]
+        
+        # Create a SecretClient
+        secret_client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+        
+        # Get the secret
+        secret = secret_client.get_secret(secret_name)
+        return json.loads(secret.value)
     except Exception as e:
-        logger.error(f"Error fetching DB credentials: {str(e)}")
-        raise
+        logger.error(f"Error getting PostgreSQL credentials: {str(e)}")
+        raise e
 
 # PostgreSQL connection
 def get_postgres_connection(creds):
@@ -92,7 +122,6 @@ def get_postgres_connection(creds):
         password=creds['password'],
         dbname=creds['dbname']
     )
-
 
 # Vector similarity search using pgvector
 def similarity_search(query_embedding: List[float], user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -148,7 +177,6 @@ def similarity_search(query_embedding: List[float], user_id: str, limit: int = 5
         cursor.close()
         conn.close()
 
-
 # Generate a response from Gemini using relevant context
 def generate_response(query: str, relevant_chunks: List[Dict[str, Any]]) -> str:
     context = "\n\n".join([f"Document: {c['file_name']}\nContent: {c['content']}" for c in relevant_chunks])
@@ -181,64 +209,58 @@ def generate_response(query: str, relevant_chunks: List[Dict[str, Any]]) -> str:
         logger.error(f"Failed to generate response: {str(e)}")
         return "Sorry, I couldn't generate a response. Please try again later."
 
-# Lambda handler
-def handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
+# Azure Function entry point
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info('Query processor function processed a request.')
+    
     try:
-         # Extract body from the request for API Gateway calls
-        body = {}
-        if 'body' in event:
-            if isinstance(event.get('body'), str) and event.get('body'):
-                try:
-                    body = json.loads(event['body'])
-                except json.JSONDecodeError:
-                    body = {}
-            elif isinstance(event.get('body'), dict):
-                body = event.get('body')
-                
+        # Parse request body
+        req_body = req.get_json()
+        
         # Check if this is a health check request
-        if event.get('action') == 'healthcheck' or body.get('action') == 'healthcheck':
-            return {
-                'statusCode': 200,
-                'headers': {
-                    'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*'
-                },
-                'body': json.dumps({
+        if req_body.get('action') == 'healthcheck':
+            return func.HttpResponse(
+                json.dumps({
                     'message': 'Query processor is healthy',
                     'stage': STAGE
-                })
-            }
-
-        query = body.get('query')
-        user_id = body.get('user_id', 'system')
-
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        query = req_body.get('query')
+        user_id = req_body.get('user_id', 'system')
+        
         if not query:
-            return {
-                'statusCode': 400,
-                'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-                'body': json.dumps({'message': 'Query is required'})
-            }
-
+            return func.HttpResponse(
+                json.dumps({
+                    'message': 'Query is required'
+                }),
+                mimetype="application/json",
+                status_code=400
+            )
+        
         query_embedding = embed_query(query)
         relevant_chunks = similarity_search(query_embedding, user_id)
         response = generate_response(query, relevant_chunks)
-
-        return {
-            'statusCode': 200,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({
+        
+        return func.HttpResponse(
+            json.dumps({
                 'query': query,
                 'response': response,
                 'results': relevant_chunks,
                 'count': len(relevant_chunks)
-            }, cls=DecimalEncoder)
-        }
-
+            }, cls=DecimalEncoder),
+            mimetype="application/json",
+            status_code=200
+        )
+        
     except Exception as e:
         logger.error(f"Unhandled error: {str(e)}")
-        return {
-            'statusCode': 500,
-            'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-            'body': json.dumps({'message': f"Internal error: {str(e)}"})
-        }
+        return func.HttpResponse(
+            json.dumps({
+                'message': f"Internal error: {str(e)}"
+            }),
+            mimetype="application/json",
+            status_code=500
+        )

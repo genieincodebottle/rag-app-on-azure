@@ -1,181 +1,234 @@
+# scripts/network-diagnostics.sh
+
 #!/bin/bash
-# Simple Network Connectivity Check for RDS
-# Usage: ./network-diagnostics.sh <environment> [aws-region] <project_name>
+# Simple Network Connectivity Check for PostgreSQL
+# Usage: ./network-diagnostics.sh <environment> [location] <project_name>
 
 set -e
 
 # Default values
-AWS_REGION=${2}
+LOCATION=${2}
 PROJECT_NAME=${3}
 ENV=$1
 
 # Check if environment was provided
 if [ -z "$ENV" ]; then
   echo "Error: Environment not specified"
-  echo "Usage: $0 <environment> [aws-region]"
-  echo "Example: $0 dev us-east-1"
+  echo "Usage: $0 <environment> [location]"
+  echo "Example: $0 dev eastus"
   exit 1
 fi
 
-echo "Running network diagnostics for $PROJECT_NAME-$ENV in $AWS_REGION"
+echo "Running network diagnostics for $PROJECT_NAME-$ENV in $LOCATION"
 
-# Get RDS endpoint
-echo "Getting RDS endpoint..."
-DB_ENDPOINT=$(aws rds describe-db-instances \
-  --db-instance-identifier "$PROJECT_NAME-$ENV-postgres" \
-  --region "$AWS_REGION" \
-  --query "DBInstances[0].Endpoint.Address" \
-  --output text 2>/dev/null || echo "not-found")
+# Get PostgreSQL server FQDN
+echo "Getting PostgreSQL server FQDN..."
+SERVER_NAME="${PROJECT_NAME}-${ENV}-postgres"
+RESOURCE_GROUP="${PROJECT_NAME}-${ENV}-rg"
 
-if [ "$DB_ENDPOINT" == "not-found" ] || [ -z "$DB_ENDPOINT" ]; then
-  echo "Error: RDS instance not found!"
+DB_FQDN=$(az postgres flexible-server show \
+  --name "$SERVER_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "fullyQualifiedDomainName" \
+  --output tsv 2>/dev/null || echo "not-found")
+
+if [ "$DB_FQDN" == "not-found" ] || [ -z "$DB_FQDN" ]; then
+  echo "Error: PostgreSQL server not found!"
   exit 1
 fi
 
-echo "RDS Endpoint: $DB_ENDPOINT"
+echo "PostgreSQL FQDN: $DB_FQDN"
 
-# Get VPC ID
-echo "Getting VPC ID..."
-VPC_ID=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=$PROJECT_NAME-$ENV-vpc" \
-  --region "$AWS_REGION" \
-  --query "Vpcs[0].VpcId" \
-  --output text)
+# Get VNet ID
+echo "Getting VNet ID..."
+VNET_NAME="${PROJECT_NAME}-${ENV}-vnet"
+VNET_ID=$(az network vnet show \
+  --name "$VNET_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "id" \
+  --output tsv 2>/dev/null || echo "not-found")
 
-if [ -z "$VPC_ID" ]; then
-  echo "Error: VPC not found!"
+if [ -z "$VNET_ID" ]; then
+  echo "Error: VNet not found!"
   exit 1
 fi
 
-echo "VPC ID: $VPC_ID"
+echo "VNet ID: $VNET_ID"
 
-# Get Lambda SG
-echo "Getting Lambda Security Group ID..."
-LAMBDA_SG_ID=$(aws ec2 describe-security-groups \
-  --filters "Name=tag:Name,Values=$PROJECT_NAME-$ENV-lambda-sg" \
-  --region "$AWS_REGION" \
-  --query "SecurityGroups[0].GroupId" \
-  --output text)
+# Get Function subnet NSG
+echo "Getting Function Subnet NSG..."
+FUNCTION_NSG_NAME="${PROJECT_NAME}-${ENV}-function-nsg"
+FUNCTION_NSG_ID=$(az network nsg show \
+  --name "$FUNCTION_NSG_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "id" \
+  --output tsv 2>/dev/null || echo "not-found")
 
-echo "Lambda Security Group ID: $LAMBDA_SG_ID"
+echo "Function NSG ID: $FUNCTION_NSG_ID"
 
-# Get DB SG
-echo "Getting DB Security Group ID..."
-DB_SG_ID=$(aws ec2 describe-security-groups \
-  --filters "Name=tag:Name,Values=$PROJECT_NAME-$ENV-db-sg" \
-  --region "$AWS_REGION" \
-  --query "SecurityGroups[0].GroupId" \
-  --output text)
+# Get DB subnet NSG
+echo "Getting DB Subnet NSG..."
+DB_NSG_NAME="${PROJECT_NAME}-${ENV}-database-nsg"
+DB_NSG_ID=$(az network nsg show \
+  --name "$DB_NSG_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "id" \
+  --output tsv 2>/dev/null || echo "not-found")
 
-echo "DB Security Group ID: $DB_SG_ID"
+echo "DB NSG ID: $DB_NSG_ID"
 
-# Check DB SG inbound rules
-echo -e "\nDB Security Group Inbound Rules:"
-aws ec2 describe-security-group-rules \
-  --filters "Name=group-id,Values=$DB_SG_ID" \
-  --region "$AWS_REGION" \
-  --query "SecurityGroupRules[?IsEgress==\`false\`].{Protocol:IpProtocol,FromPort:FromPort,ToPort:ToPort,Source:References[0].SecurityGroupId||CidrIpv4}" \
+# Check DB NSG inbound rules
+echo -e "\nDB Subnet NSG Inbound Rules:"
+az network nsg rule list \
+  --nsg-name "$DB_NSG_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[?direction=='Inbound'].{Name:name, Priority:priority, SourceAddressPrefix:sourceAddressPrefix, DestinationPortRange:destinationPortRange, Protocol:protocol, Access:access}" \
   --output table
 
-# Check Lambda SG outbound rules
-echo -e "\nLambda Security Group Outbound Rules:"
-aws ec2 describe-security-group-rules \
-  --filters "Name=group-id,Values=$LAMBDA_SG_ID" \
-  --region "$AWS_REGION" \
-  --query "SecurityGroupRules[?IsEgress==\`true\`].{Protocol:IpProtocol,FromPort:FromPort,ToPort:ToPort,Destination:References[0].SecurityGroupId||CidrIpv4}" \
+# Check Function NSG outbound rules
+echo -e "\nFunction NSG Outbound Rules:"
+az network nsg rule list \
+  --nsg-name "$FUNCTION_NSG_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "[?direction=='Outbound'].{Name:name, Priority:priority, DestinationAddressPrefix:destinationAddressPrefix, DestinationPortRange:destinationPortRange, Protocol:protocol, Access:access}" \
   --output table
 
-# Check DNS resolution from Lambda
-LAMBDA_FUNCTION="${PROJECT_NAME}-${ENV}-db-init"
-echo -e "\nChecking if Lambda function exists: $LAMBDA_FUNCTION"
-if aws lambda get-function --function-name "$LAMBDA_FUNCTION" --region "$AWS_REGION" &> /dev/null; then
-  echo "Lambda function found. Testing DNS resolution..."
+# Check DNS resolution from a test VM
+echo -e "\nChecking if we can create a test VM for network diagnostics..."
+TEST_VM_NAME="${PROJECT_NAME}-${ENV}-test-vm"
 
-  cat > dns_test.py << EOF
-import json
-import socket
+# Check if test VM exists
+VM_EXISTS=$(az vm show --name "$TEST_VM_NAME" --resource-group "$RESOURCE_GROUP" --query "name" --output tsv 2>/dev/null || echo "")
 
-def lambda_handler(event, context):
-    try:
-        hostname = "$DB_ENDPOINT"
-        ip_address = socket.gethostbyname(hostname)
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'hostname': hostname,
-                'ip_address': ip_address,
-                'result': 'success'
-            })
-        }
-    except Exception as e:
-        return {
-            'statusCode': 500,
-            'body': json.dumps({
-                'hostname': "$DB_ENDPOINT",
-                'error': str(e),
-                'result': 'failure'
-            })
-        }
-EOF
-
-  zip dns_test.zip dns_test.py
-
-  echo "Updating Lambda with DNS test function..."
-  aws lambda update-function-code \
-    --function-name "$LAMBDA_FUNCTION" \
-    --zip-file fileb://dns_test.zip \
-    --region "$AWS_REGION"
-
-  echo "Waiting for Lambda update..."
-  sleep 5
-
-  echo "Testing DNS resolution for $DB_ENDPOINT from Lambda..."
-  aws lambda invoke \
-    --function-name "$LAMBDA_FUNCTION" \
-    --payload '{}' \
-    --region "$AWS_REGION" \
-    dns_result.json
-
-  echo "DNS test result:"
-  cat dns_result.json
-  echo ""
-
-  rm -f dns_test.py dns_test.zip
-
-  echo "Restoring original Lambda function..."
-  if aws s3 ls "s3://${PROJECT_NAME}-${ENV}-documents/lambda/db_init.zip" &> /dev/null; then
-    aws s3 cp "s3://${PROJECT_NAME}-${ENV}-documents/lambda/db_init.zip" db_init.zip
-    aws lambda update-function-code \
-      --function-name "$LAMBDA_FUNCTION" \
-      --zip-file fileb://db_init.zip \
-      --region "$AWS_REGION"
-    rm -f db_init.zip
+if [ -z "$VM_EXISTS" ]; then
+  echo "No test VM found. Would you like to create a temporary VM to test connectivity? (yes/no)"
+  read CREATE_VM
+  
+  if [ "$CREATE_VM" == "yes" ]; then
+    echo "Creating temporary test VM in Function subnet..."
+    
+    # Get Function subnet ID
+    FUNCTION_SUBNET_ID=$(az network vnet subnet show \
+      --name "${PROJECT_NAME}-${ENV}-function-subnet" \
+      --vnet-name "$VNET_NAME" \
+      --resource-group "$RESOURCE_GROUP" \
+      --query "id" \
+      --output tsv)
+    
+    # Create VM
+    az vm create \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "$TEST_VM_NAME" \
+      --image UbuntuLTS \
+      --admin-username azureuser \
+      --generate-ssh-keys \
+      --subnet "$FUNCTION_SUBNET_ID" \
+      --public-ip-address "" \
+      --size Standard_B1s \
+      --no-wait
+    
+    echo "VM creation started. It will take a few minutes to complete."
+    echo "Please run this script again after the VM is created to continue with diagnostics."
+    exit 0
   else
-    echo "Original Lambda function code not found at s3://${PROJECT_NAME}-${ENV}-documents/lambda/db_init.zip"
-    echo "You will need to manually restore the Lambda function."
+    echo "Skipping connectivity tests that require a VM."
   fi
 else
-  echo "Lambda function $LAMBDA_FUNCTION not found. Skipping DNS resolution test."
+  echo "Found test VM: $TEST_VM_NAME"
+  
+  # Run DNS resolution test on VM
+  echo "Testing DNS resolution for $DB_FQDN from test VM..."
+  
+  DNS_TEST=$(az vm run-command invoke \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$TEST_VM_NAME" \
+    --command-id RunShellScript \
+    --scripts "nslookup $DB_FQDN" \
+    --query "value[0].message" \
+    --output tsv)
+  
+  echo -e "\nDNS Resolution Test Result:"
+  echo "$DNS_TEST"
+  
+  # Run connectivity test on VM
+  echo -e "\nTesting TCP connectivity to PostgreSQL port 5432..."
+  
+  CONN_TEST=$(az vm run-command invoke \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$TEST_VM_NAME" \
+    --command-id RunShellScript \
+    --scripts "timeout 5 nc -zv $DB_FQDN 5432 || echo 'Connection failed'" \
+    --query "value[0].message" \
+    --output tsv)
+  
+  echo -e "Connectivity Test Result:"
+  echo "$CONN_TEST"
+  
+  # Offer to clean up test VM
+  echo -e "\nWould you like to delete the test VM now? (yes/no)"
+  read DELETE_VM
+  
+  if [ "$DELETE_VM" == "yes" ]; then
+    echo "Deleting test VM..."
+    az vm delete \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "$TEST_VM_NAME" \
+      --yes
+    
+    # Also delete related resources
+    echo "Cleaning up related resources..."
+    az disk delete \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "${TEST_VM_NAME}_OsDisk_1_*" \
+      --yes
+    
+    az network nic delete \
+      --resource-group "$RESOURCE_GROUP" \
+      --name "${TEST_VM_NAME}VMNic"
+    
+    echo "Test VM and related resources deleted."
+  fi
 fi
 
-# Check RDS status
-echo -e "\nRDS Instance Status:"
-aws rds describe-db-instances \
-  --db-instance-identifier "$PROJECT_NAME-$ENV-postgres" \
-  --region "$AWS_REGION" \
-  --query "DBInstances[0].{Status:DBInstanceStatus,Identifier:DBInstanceIdentifier,Engine:Engine,VpcId:DBSubnetGroup.VpcId}" \
+# Check PostgreSQL server status
+echo -e "\nPostgreSQL Server Status:"
+az postgres flexible-server show \
+  --name "$SERVER_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "{Name:name, Status:userVisibleState, Version:version, Location:location}" \
   --output table
+
+# Get Key Vault name
+KEY_VAULT_NAME="${PROJECT_NAME}-${ENV}-kv"
+KV_EXISTS=$(az keyvault show --name "$KEY_VAULT_NAME" --resource-group "$RESOURCE_GROUP" --query "name" --output tsv 2>/dev/null || echo "")
+
+if [ -n "$KV_EXISTS" ]; then
+  echo -e "\nChecking Key Vault secret for database credentials..."
+  
+  DB_SECRET_EXISTS=$(az keyvault secret list \
+    --vault-name "$KEY_VAULT_NAME" \
+    --query "[?name=='db-credentials'].name" \
+    --output tsv)
+  
+  if [ -n "$DB_SECRET_EXISTS" ]; then
+    echo "✅ Database credentials secret exists in Key Vault"
+  else
+    echo "❌ Database credentials secret not found in Key Vault"
+  fi
+else
+  echo "❌ Key Vault not found: $KEY_VAULT_NAME"
+fi
 
 # Summary
 echo -e "\nConnectivity Check Summary:"
-echo "1. RDS Endpoint: $DB_ENDPOINT"
-echo "2. VPC ID: $VPC_ID"
-echo "3. Lambda Security Group: $LAMBDA_SG_ID"
-echo "4. DB Security Group: $DB_SG_ID"
+echo "1. PostgreSQL FQDN: $DB_FQDN"
+echo "2. VNet ID: $VNET_ID"
+echo "3. Function NSG: $FUNCTION_NSG_ID"
+echo "4. DB NSG: $DB_NSG_ID"
 
 echo -e "\nRecommendations:"
-echo "1. Check the Secret Manager entry has the correct endpoint: $DB_ENDPOINT"
-echo "2. Ensure DB Security Group allows inbound traffic from Lambda Security Group on port 5432"
-echo "3. Ensure Lambda Security Group allows outbound traffic to DB Security Group on port 5432"
-echo "4. Verify Lambda and RDS are in the same VPC ($VPC_ID)"
-echo "5. Ensure the VPC has proper DNS resolution (enableDnsHostnames and enableDnsSupport)"
+echo "1. Check that the Key Vault secret has the correct connection details"
+echo "2. Ensure DB NSG allows inbound traffic from Function subnet on port 5432"
+echo "3. Ensure Function NSG allows outbound traffic to DB subnet on port 5432"
+echo "4. Verify that all resources are in the same Virtual Network"
+echo "5. Check that the private DNS zone is properly configured"

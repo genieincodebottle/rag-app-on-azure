@@ -1,39 +1,46 @@
 """
-Lambda function to initialize the PostgreSQL database with pgvector extension.
+Azure Function to initialize the PostgreSQL database with pgvector extension.
 """
 import os
 import json
-import boto3
 import logging
+import azure.functions as func
 import psycopg2
 import time
 import socket
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from azure.keyvault.secrets import SecretClient
+from azure.identity import DefaultAzureCredential
 
 # Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-# Initialize AWS clients
-secretsmanager = boto3.client('secretsmanager')
 
 # Get environment variables
-DB_SECRET_ARN = os.environ.get('DB_SECRET_ARN')
+DB_SECRET_URI = os.environ.get('DB_SECRET_URI')
 STAGE = os.environ.get('STAGE')
-MAX_RETRIES = int(os.environ.get('MAX_RETRIES'))
-RETRY_DELAY = int(os.environ.get('RETRY_DELAY'))  # seconds
+MAX_RETRIES = int(os.environ.get('MAX_RETRIES', 5))
+RETRY_DELAY = int(os.environ.get('RETRY_DELAY', 10))  # seconds
 
 
 def get_postgres_credentials():
     """
-    Get PostgreSQL credentials from Secrets Manager.
+    Get PostgreSQL credentials from Azure Key Vault.
     """
     try:
-        secret_response = secretsmanager.get_secret_value(
-            SecretId=DB_SECRET_ARN
-        )
-        secret = json.loads(secret_response['SecretString'])
-        return secret
+        # Parse URI to get Key Vault name and secret name
+        parts = DB_SECRET_URI.replace("https://", "").split('/')
+        key_vault_name = parts[0].split('.')[0]
+        secret_name = parts[-1]
+        
+        # Create a SecretClient using DefaultAzureCredential
+        credential = DefaultAzureCredential()
+        client = SecretClient(vault_url=f"https://{key_vault_name}.vault.azure.net/", credential=credential)
+        
+        # Get the secret
+        secret = client.get_secret(secret_name)
+        creds = json.loads(secret.value)
+        return creds
     except Exception as e:
         logger.error(f"Error getting PostgreSQL credentials: {str(e)}")
         raise e

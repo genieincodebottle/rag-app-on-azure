@@ -1,31 +1,24 @@
+# modules/database/main.tf
+
 # ================================
 # Database Module for RAG System
 # ================================
-# Sets up PostgreSQL RDS with Secrets Manager integration, parameter group, and conditional import logic
+# Sets up PostgreSQL Flexible Server with Key Vault integration
 
 locals {
   name = "${var.project_name}-${var.stage}"
-  create_db = !var.import_db
+  server_name = "${var.project_name}-${var.stage}-postgres"
+  key_vault_name = "${var.project_name}-${var.stage}-kv"
   
   # Define fallback values for DB endpoints and connection info
-  db_endpoint_fallback = "${local.name}-postgres.${var.aws_region}.rds.amazonaws.com"
+  db_endpoint_fallback = "${local.server_name}.postgres.database.azure.com"
   db_port_fallback = 5432
   
-  # We'll use these for conditional logic
   common_tags = {
     Project     = var.project_name
     Environment = var.stage
     ManagedBy   = "Terraform"
   }
-}
-
-# ============================================================================
-# Get the actual RDS endpoint or use the default postgres endpoint as fallback
-# ============================================================================
-
-data "aws_db_instance" "postgres" {
-  count = var.import_db ? 1 : 0
-  db_instance_identifier = "${local.name}-postgres"
 }
 
 # Generate a random password for the database
@@ -40,137 +33,106 @@ resource "random_password" "postgres_password" {
   }
 }
 
-# ====================================================================
-# Use a null_resource to check if the DB exists instead of data source
-# ====================================================================
-
-resource "null_resource" "db_existence_check" {
-  count = var.import_db ? 1 : 0
-  
-  # This will run during plan phase to check if the DB exists
-  provisioner "local-exec" {
-    command = <<EOF
-      aws rds describe-db-instances --db-instance-identifier ${local.name}-postgres > /dev/null 2>&1
-      if [ $? -eq 0 ]; then
-        echo "DB exists"
-        exit 0
-      else
-        echo "DB does not exist, but import_db is set to true. Setting create_db to true."
-        exit 0  # Continue anyway
-      fi
-    EOF
-  }
+# Create a DNS zone for private PostgreSQL server
+resource "azurerm_private_dns_zone" "postgres" {
+  name                = "privatelink.postgres.database.azure.com"
+  resource_group_name = var.resource_group_name
 }
 
-# ================================================================================
-# Instead of data source, create a "dummy" resource to hold DB info when importing
-# This is never actually created, just used to model the existing DB
-# ================================================================================
-
-resource "aws_db_instance" "dummy_for_import" {
-  count = 0  # Never create this
-
-  identifier             = "${local.name}-postgres"
-  engine                 = "postgres"
-  instance_class         = var.db_instance_class
-  allocated_storage      = var.db_allocated_storage
-  skip_final_snapshot    = true
-  apply_immediately      = true
-
-  lifecycle {
-    prevent_destroy = true
-  }
+resource "azurerm_private_dns_zone_virtual_network_link" "postgres" {
+  name                  = "${local.name}-postgres-vnet-link"
+  resource_group_name   = var.resource_group_name
+  private_dns_zone_name = azurerm_private_dns_zone.postgres.name
+  virtual_network_id    = var.vnet_id
+  registration_enabled   = false
 }
 
-# ==================================================================
-# DB Parameter Group for PostgreSQL with RAG-specific settings
-# ==================================================================
-
-resource "aws_db_parameter_group" "postgres" {
-  name        = "${local.name}-postgres-params"
-  family      = "postgres${var.db_engine_version}"
-  description = "Parameter group for ${local.name} PostgreSQL database"
-
-  # Add parameters with proper apply_method
-  parameter {
-    name  = "shared_preload_libraries"
-    value = "pg_stat_statements,auto_explain"
-    apply_method = "pending-reboot"  # This is critical - static parameters require a reboot
-  }
+# Create PostgreSQL Flexible Server
+resource "azurerm_postgresql_flexible_server" "main" {
+  name                   = local.server_name
+  resource_group_name    = var.resource_group_name
+  location               = var.location
+  version                = "14"
+  delegated_subnet_id    = var.subnet_id
+  private_dns_zone_id    = azurerm_private_dns_zone.postgres.id
+  administrator_login    = var.admin_username
+  administrator_password = random_password.postgres_password.result
+  storage_mb             = var.db_storage_mb
+  sku_name               = var.db_sku_name
+  backup_retention_days  = 7
+  zone                   = "1"
   
-  tags = {
-    Name = "${local.name}-postgres-params"
-  }
+  depends_on = [
+    azurerm_private_dns_zone_virtual_network_link.postgres
+  ]
   
-  lifecycle {
-    create_before_destroy = true
-    prevent_destroy       = true
-  }
-}
-
-# ==================================================================
-# Create RDS PostgreSQL instance only if it doesn't already exist
-# ==================================================================
-
-resource "aws_db_instance" "postgres" {
-  # Only create if import_db is false
-  count = local.create_db ? 1 : 0
-  
-  identifier             = "${local.name}-postgres"
-  engine                 = "postgres"
-  engine_version         = var.db_engine_version
-  instance_class         = var.db_instance_class
-  allocated_storage      = var.db_allocated_storage
-  storage_type           = "gp3"
-  db_name                = var.db_name
-  username               = var.db_username
-  password               = random_password.postgres_password.result
-  db_subnet_group_name   = var.db_subnet_group_name
-  vpc_security_group_ids = [var.db_security_group_id]
-  skip_final_snapshot    = var.skip_final_snapshot
-  apply_immediately      = true
-  backup_retention_period = 7
-  parameter_group_name   = aws_db_parameter_group.postgres.name
-  
-  # Performance insights
-  performance_insights_enabled = true
-  performance_insights_retention_period = 7
-  
-  tags = {
-    Name = "${local.name}-postgres"
-    Environment = var.stage
-  }
+  tags = local.common_tags
   
   # Handle existing instances
   lifecycle {
     prevent_destroy = true
-    # Prevent password changes after creation
-    ignore_changes = [password]
+    # Prevent password changes after creation unless reset is requested
+    ignore_changes = [administrator_password]
   }
 }
 
-# ==========================================================
-# Store the database credentials in AWS Secrets Manager
-# ==========================================================
+# Create database
+resource "azurerm_postgresql_flexible_server_database" "main" {
+  name      = var.db_name
+  server_id = azurerm_postgresql_flexible_server.main.id
+  charset   = "UTF8"
+  collation = "en_US.utf8"
+}
 
-resource "aws_secretsmanager_secret" "db_credentials" {
-  name        = "${local.name}-db-credentials"
-  description = "Database credentials for ${local.name}"
+# Configure PostgreSQL server parameters
+resource "azurerm_postgresql_flexible_server_configuration" "shared_buffers" {
+  name      = "shared_buffers"
+  server_id = azurerm_postgresql_flexible_server.main.id
+  value     = "128MB"
+}
+
+# Create Key Vault
+resource "azurerm_key_vault" "main" {
+  name                        = local.key_vault_name
+  location                    = var.location
+  resource_group_name         = var.resource_group_name
+  enabled_for_disk_encryption = true
+  tenant_id                   = data.azurerm_client_config.current.tenant_id
+  soft_delete_retention_days  = 7
+  purge_protection_enabled    = false
+  sku_name                    = "standard"
   
-  tags = {
-    Name = "${local.name}-db-credentials"
-    Environment = var.stage
-  }
+  tags = local.common_tags
 }
 
-resource "aws_secretsmanager_secret_version" "db_credentials" {
-  secret_id = aws_secretsmanager_secret.db_credentials.id
-  secret_string = jsonencode({
-    username = var.db_username
+# Get current Azure account configuration
+data "azurerm_client_config" "current" {}
+
+# Configure Key Vault access policy for the currently authenticated user (for Terraform)
+resource "azurerm_key_vault_access_policy" "terraform" {
+  key_vault_id = azurerm_key_vault.main.id
+  tenant_id    = data.azurerm_client_config.current.tenant_id
+  object_id    = data.azurerm_client_config.current.object_id
+  
+  secret_permissions = [
+    "Get", "List", "Set", "Delete", "Recover", "Backup", "Restore", "Purge"
+  ]
+}
+
+# Store the database credentials in Azure Key Vault
+resource "azurerm_key_vault_secret" "db_credentials" {
+  name         = "db-credentials"
+  value = jsonencode({
+    username = var.admin_username
     password = random_password.postgres_password.result
-    engine   = "postgres"
-    host     = local.create_db ? (length(aws_db_instance.postgres) > 0 ? aws_db_instance.postgres[0].address : data.aws_db_instance.postgres[0].address) : data.aws_db_instance.postgres[0].address
-    port     = local.create_db ? (length(aws_db_instance.postgres) > 0 ? aws_db_instance.postgres[0].port : data.aws_db_instance.postgres[0].port) : data.aws_db_instance.postgres[0].port
+    host     = azurerm_postgresql_flexible_server.main.fqdn
+    port     = 5432
     dbname   = var.db_name
   })
+  key_vault_id = azurerm_key_vault.main.id
+  
+  depends_on = [
+    azurerm_key_vault_access_policy.terraform,
+    azurerm_postgresql_flexible_server_database.main
+  ]
 }

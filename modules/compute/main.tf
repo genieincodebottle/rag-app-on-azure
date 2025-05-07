@@ -1,3 +1,5 @@
+# modules/compute/main.tf
+
 # ===============================
 # Compute Module for RAG System
 # ===============================
@@ -22,353 +24,378 @@ locals {
 }
 
 # ===================================================================
-# Store GEMINI_API_KEY credentials placeholder in AWS Secrets Manager
+# Store GEMINI_API_KEY credentials placeholder in Azure Key Vault
 # ===================================================================
 
-resource "aws_secretsmanager_secret" "gemini_api_credentials" {
-  name        = "${local.name}-gemini-api-key"
-  description = "Gemini API Key for ${local.name}"
-
-  tags = {
-    Name        = "${local.name}-gemini-api-key"
-    Environment = var.stage
-  }
-}
-
-resource "aws_secretsmanager_secret_version" "gemini_api_credentials" {
-  secret_id = aws_secretsmanager_secret.gemini_api_credentials.id
-  secret_string = jsonencode({
-    GEMINI_API_KEY    = var.gemini_api_key
+resource "azurerm_key_vault_secret" "gemini_api_credentials" {
+  name         = "gemini-api-key"
+  value        = jsonencode({
+    GEMINI_API_KEY = var.gemini_api_key
   })
+  key_vault_id = var.key_vault_id
 }
 
-# =========================
-# IAM Role and Policy
-# =========================
+# ==========================
+# Function App Service Plan
+# ==========================
 
-resource "aws_iam_role" "lambda_role" {
-  name = "${var.project_name}-${var.stage}-lambda-role"
+resource "azurerm_service_plan" "function" {
+  name                = "${local.name}-function-plan"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  os_type             = "Linux"
+  sku_name            = "EP1" # Premium tier for VNet integration
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = { Service = "lambda.amazonaws.com" },
-      Action = "sts:AssumeRole"
-    }]
-  })
-
-  tags = {
-    Name = "${var.project_name}-${var.stage}-lambda-role"
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
+  tags = local.common_tags
 }
 
-resource "aws_iam_policy" "lambda_policy" {
-  name = "${var.project_name}-${var.stage}-lambda-policy"
+# ==========================
+# Storage for Function Apps
+# ==========================
 
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ],
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:HeadObject"
-        ],
-        Resource = [
-          "arn:aws:s3:::${var.documents_bucket}",
-          "arn:aws:s3:::${var.documents_bucket}/*"
-        ]
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"
-        ],
-        Resource = [
-          "arn:aws:dynamodb:*:*:table/${var.metadata_table}",
-          "arn:aws:dynamodb:*:*:table/${var.metadata_table}/index/*"
-        ]
-      },
-      {
-        Effect = "Allow",
-        Action = ["bedrock:InvokeModel"],
-        Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "ec2:CreateNetworkInterface", "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface", "ec2:AssignPrivateIpAddresses",
-          "ec2:UnassignPrivateIpAddresses"
-        ],
-        Resource = "*"
-      },
-      {
-        Effect = "Allow",
-        Action = ["secretsmanager:GetSecretValue"],
-        Resource = [
-          var.db_secret_arn,
-          aws_secretsmanager_secret.gemini_api_credentials.arn
-        ]
-      },
-      {
-        Effect = "Allow",
-        Action = [
-          "cognito-idp:AdminInitiateAuth",
-          "cognito-idp:AdminCreateUser",
-          "cognito-idp:AdminSetUserPassword",
-          "cognito-idp:AdminUpdateUserAttributes",
-          "cognito-idp:AdminGetUser",
-          "cognito-idp:AdminConfirmSignUp",
-          "cognito-idp:SignUp",
-          "cognito-idp:ConfirmSignUp",
-          "cognito-idp:InitiateAuth",
-          "cognito-idp:ForgotPassword",
-          "cognito-idp:ConfirmForgotPassword",
-          "cognito-idp:RespondToAuthChallenge"
-        ],
-        Resource = var.cognito_user_pool_arn != "" ? [var.cognito_user_pool_arn] : ["*"]
-      }
-    ]
-  })
+resource "azurerm_storage_account" "function" {
+  name                     = "${var.project_name}${var.stage}func"
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  account_kind             = "StorageV2"
+  min_tls_version          = "TLS1_2"
+
+  tags = local.common_tags
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_basic" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = aws_iam_policy.lambda_policy.arn
-}
+# ==========================
+# Function Apps
+# ==========================
 
-# =========================
-# Lambda Code from S3
-# =========================
-
-data "aws_s3_object" "auth_handler_code" {
-  bucket = var.lambda_code_bucket
-  key    = "lambda/auth_handler.zip"
-}
-
-data "aws_s3_object" "document_processor_code" {
-  bucket = var.lambda_code_bucket
-  key    = "lambda/document_processor.zip"
-}
-
-data "aws_s3_object" "query_processor_code" {
-  bucket = var.lambda_code_bucket
-  key    = "lambda/query_processor.zip"
-}
-
-data "aws_s3_object" "upload_handler_code" {
-  bucket = var.lambda_code_bucket
-  key    = "lambda/upload_handler.zip"
-}
-
-data "aws_s3_object" "db_init_code" {
-  bucket = var.lambda_code_bucket
-  key    = "lambda/db_init.zip"
-}
-
-# =========================
-# Lambda Functions
-# =========================
-
-resource "aws_lambda_function" "auth_handler" {
-  function_name = local.auth_handler_name
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "auth_handler.handler"
-  runtime       = "python3.11"
-  memory_size   = var.lambda_memory_size
-  timeout       = var.lambda_timeout
-
-  environment {
-    variables = {
-      USER_POOL_ID = var.cognito_user_pool_id
-      CLIENT_ID    = var.cognito_app_client_id
-      STAGE        = var.stage
+resource "azurerm_linux_function_app" "document_processor" {
+  name                       = local.document_processor_name
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  service_plan_id            = azurerm_service_plan.function.id
+  storage_account_name       = azurerm_storage_account.function.name
+  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+    
+    application_insights_connection_string = azurerm_application_insights.function.connection_string
+    application_insights_key               = azurerm_application_insights.function.instrumentation_key
+    
+    vnet_route_all_enabled = true
+    
+    cors {
+      allowed_origins = ["*"] # Adjust for your environment
     }
   }
-
-  s3_bucket        = var.lambda_code_bucket
-  s3_key           = "lambda/auth_handler.zip"
-  source_code_hash = data.aws_s3_object.auth_handler_code.etag
-}
-
-resource "aws_lambda_function" "document_processor" {
-  function_name = local.document_processor_name
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "document_processor.handler"
-  runtime       = "python3.11"
-  memory_size   = var.lambda_memory_size
-  timeout       = var.lambda_timeout
-
-  environment {
-    variables = {
-      DOCUMENTS_BUCKET         = var.documents_bucket
-      METADATA_TABLE           = var.metadata_table
-      STAGE                    = var.stage
-      DB_SECRET_ARN            = var.db_secret_arn
-      GEMINI_SECRET_ARN        = aws_secretsmanager_secret.gemini_api_credentials.arn
-      GEMINI_MODEL             = var.gemini_model
-      GEMINI_EMBEDDING_MODEL   = var.gemini_embedding_model
-      TEMPERATURE              = 0.2
-      MAX_OUTPUT_TOKENS        = 1024
-      TOP_K                    = 40
-      TOP_P                    = 0.8
-      SIMILARITY_THRESHOLD     = 0.7
-    }
+  
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME"    = "python"
+    "AzureWebJobsDisableHomepage" = "true"
+    "DOCUMENTS_CONTAINER"         = var.documents_container
+    "DOCUMENTS_STORAGE"           = var.documents_storage_account
+    "METADATA_COSMOS_ACCOUNT"     = var.metadata_cosmos_account
+    "METADATA_COSMOS_DATABASE"    = var.metadata_cosmos_database
+    "METADATA_CONTAINER"          = var.metadata_cosmos_container
+    "STAGE"                       = var.stage
+    "DB_SECRET_URI"               = var.db_secret_uri
+    "GEMINI_SECRET_URI"           = "https://${var.key_vault_name}.vault.azure.net/secrets/gemini-api-key"
+    "GEMINI_MODEL"                = var.gemini_model
+    "GEMINI_EMBEDDING_MODEL"      = var.gemini_embedding_model
+    "TEMPERATURE"                 = "0.2"
+    "MAX_OUTPUT_TOKENS"           = "1024"
+    "TOP_K"                       = "40"
+    "TOP_P"                       = "0.8"
+    "SIMILARITY_THRESHOLD"        = "0.7"
   }
-
-  vpc_config {
-    subnet_ids         = var.vpc_subnet_ids
-    security_group_ids = [var.lambda_security_group_id]
+  
+  identity {
+    type = "SystemAssigned"
   }
-
-  s3_bucket        = var.lambda_code_bucket
-  s3_key           = "lambda/document_processor.zip"
-  source_code_hash = data.aws_s3_object.document_processor_code.etag
+  
+  virtual_network_subnet_id = var.subnet_id
 
   tags = {
     Name = local.document_processor_name
   }
 }
 
-resource "aws_lambda_function" "query_processor" {
-  function_name = local.query_processor_name
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "query_processor.handler"
-  runtime       = "python3.11"
-  memory_size   = var.lambda_memory_size
-  timeout       = var.lambda_timeout
-
-  environment {
-    variables = {
-      DOCUMENTS_BUCKET         = var.documents_bucket
-      METADATA_TABLE           = var.metadata_table
-      STAGE                    = var.stage
-      DB_SECRET_ARN            = var.db_secret_arn
-      GEMINI_SECRET_ARN        = aws_secretsmanager_secret.gemini_api_credentials.arn
-      GEMINI_MODEL             = var.gemini_model
-      GEMINI_EMBEDDING_MODEL   = var.gemini_embedding_model
-      TEMPERATURE              = 0.2
-      MAX_OUTPUT_TOKENS        = 1024
-      TOP_K                    = 40
-      TOP_P                    = 0.8
-      SIMILARITY_THRESHOLD     = 0.7
+resource "azurerm_linux_function_app" "query_processor" {
+  name                       = local.query_processor_name
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  service_plan_id            = azurerm_service_plan.function.id
+  storage_account_name       = azurerm_storage_account.function.name
+  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+    
+    application_insights_connection_string = azurerm_application_insights.function.connection_string
+    application_insights_key               = azurerm_application_insights.function.instrumentation_key
+    
+    vnet_route_all_enabled = true
+    
+    cors {
+      allowed_origins = ["*"] # Adjust for your environment
     }
   }
-
-  vpc_config {
-    subnet_ids         = var.vpc_subnet_ids
-    security_group_ids = [var.lambda_security_group_id]
+  
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME"    = "python"
+    "AzureWebJobsDisableHomepage" = "true"
+    "DOCUMENTS_CONTAINER"         = var.documents_container
+    "DOCUMENTS_STORAGE"           = var.documents_storage_account
+    "METADATA_COSMOS_ACCOUNT"     = var.metadata_cosmos_account
+    "METADATA_COSMOS_DATABASE"    = var.metadata_cosmos_database
+    "METADATA_CONTAINER"          = var.metadata_cosmos_container
+    "STAGE"                       = var.stage
+    "DB_SECRET_URI"               = var.db_secret_uri
+    "GEMINI_SECRET_URI"           = "https://${var.key_vault_name}.vault.azure.net/secrets/gemini-api-key"
+    "GEMINI_MODEL"                = var.gemini_model
+    "GEMINI_EMBEDDING_MODEL"      = var.gemini_embedding_model
+    "TEMPERATURE"                 = "0.2"
+    "MAX_OUTPUT_TOKENS"           = "1024"
+    "TOP_K"                       = "40"
+    "TOP_P"                       = "0.8"
+    "SIMILARITY_THRESHOLD"        = "0.7"
   }
-
-  s3_bucket        = var.lambda_code_bucket
-  s3_key           = "lambda/query_processor.zip"
-  source_code_hash = data.aws_s3_object.query_processor_code.etag
+  
+  identity {
+    type = "SystemAssigned"
+  }
+  
+  virtual_network_subnet_id = var.subnet_id
 
   tags = {
     Name = local.query_processor_name
   }
 }
 
-resource "aws_lambda_function" "upload_handler" {
-  function_name = local.upload_handler_name
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "upload_handler.handler"
-  runtime       = "python3.11"
-  memory_size   = var.lambda_memory_size
-  timeout       = var.lambda_timeout
-
-  environment {
-    variables = {
-      DOCUMENTS_BUCKET = var.documents_bucket
-      METADATA_TABLE   = var.metadata_table
-      STAGE            = var.stage
-      DB_SECRET_ARN    = var.db_secret_arn
+resource "azurerm_linux_function_app" "upload_handler" {
+  name                       = local.upload_handler_name
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  service_plan_id            = azurerm_service_plan.function.id
+  storage_account_name       = azurerm_storage_account.function.name
+  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+    
+    application_insights_connection_string = azurerm_application_insights.function.connection_string
+    application_insights_key               = azurerm_application_insights.function.instrumentation_key
+    
+    vnet_route_all_enabled = true
+    
+    cors {
+      allowed_origins = ["*"] # Adjust for your environment
     }
   }
-
-  vpc_config {
-    subnet_ids         = var.vpc_subnet_ids
-    security_group_ids = [var.lambda_security_group_id]
+  
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME"    = "python"
+    "AzureWebJobsDisableHomepage" = "true"
+    "DOCUMENTS_CONTAINER"         = var.documents_container
+    "DOCUMENTS_STORAGE"           = var.documents_storage_account
+    "METADATA_COSMOS_ACCOUNT"     = var.metadata_cosmos_account
+    "METADATA_COSMOS_DATABASE"    = var.metadata_cosmos_database
+    "METADATA_CONTAINER"          = var.metadata_cosmos_container
+    "STAGE"                       = var.stage
+    "DB_SECRET_URI"               = var.db_secret_uri
   }
-
-  s3_bucket        = var.lambda_code_bucket
-  s3_key           = "lambda/upload_handler.zip"
-  source_code_hash = data.aws_s3_object.upload_handler_code.etag
+  
+  identity {
+    type = "SystemAssigned"
+  }
+  
+  virtual_network_subnet_id = var.subnet_id
 
   tags = {
     Name = local.upload_handler_name
   }
 }
 
-resource "aws_lambda_function" "db_init" {
-  function_name = local.db_init_name
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "db_init.handler"
-  runtime       = "python3.11"
-  memory_size   = var.lambda_memory_size
-  timeout       = var.lambda_timeout
-
-  environment {
-    variables = {
-      DOCUMENTS_BUCKET = var.documents_bucket
-      METADATA_TABLE   = var.metadata_table
-      STAGE            = var.stage
-      DB_SECRET_ARN    = var.db_secret_arn
-      MAX_RETRIES      = var.max_retries
-      RETRY_DELAY      = var.retry_delay
+resource "azurerm_linux_function_app" "db_init" {
+  name                       = local.db_init_name
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  service_plan_id            = azurerm_service_plan.function.id
+  storage_account_name       = azurerm_storage_account.function.name
+  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+    
+    application_insights_connection_string = azurerm_application_insights.function.connection_string
+    application_insights_key               = azurerm_application_insights.function.instrumentation_key
+    
+    vnet_route_all_enabled = true
+    
+    cors {
+      allowed_origins = ["*"] # Adjust for your environment
     }
   }
-
-  vpc_config {
-    subnet_ids         = var.vpc_subnet_ids
-    security_group_ids = [var.lambda_security_group_id]
+  
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME"    = "python"
+    "AzureWebJobsDisableHomepage" = "true"
+    "DOCUMENTS_CONTAINER"         = var.documents_container
+    "DOCUMENTS_STORAGE"           = var.documents_storage_account
+    "METADATA_COSMOS_ACCOUNT"     = var.metadata_cosmos_account
+    "METADATA_COSMOS_DATABASE"    = var.metadata_cosmos_database
+    "METADATA_CONTAINER"          = var.metadata_cosmos_container
+    "STAGE"                       = var.stage
+    "DB_SECRET_URI"               = var.db_secret_uri
+    "MAX_RETRIES"                 = var.max_retries
+    "RETRY_DELAY"                 = var.retry_delay
   }
-
-  s3_bucket        = var.lambda_code_bucket
-  s3_key           = "lambda/db_init.zip"
-  source_code_hash = data.aws_s3_object.db_init_code.etag
+  
+  identity {
+    type = "SystemAssigned"
+  }
+  
+  virtual_network_subnet_id = var.subnet_id
 
   tags = {
     Name = local.db_init_name
   }
 }
 
-# =========================
-# Lambda Triggers
-# =========================
-
-resource "aws_lambda_permission" "s3_invoke_lambda_document_processor" {
-  statement_id  = "AllowExecutionFromS3Bucket"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.document_processor.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = "arn:aws:s3:::${var.documents_bucket}"
-}
-
-resource "aws_s3_bucket_notification" "bucket_notification" {
-  bucket = var.documents_bucket
-
-  lambda_function {
-    lambda_function_arn = aws_lambda_function.document_processor.arn
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "uploads/"
+resource "azurerm_linux_function_app" "auth_handler" {
+  name                       = local.auth_handler_name
+  resource_group_name        = var.resource_group_name
+  location                   = var.location
+  service_plan_id            = azurerm_service_plan.function.id
+  storage_account_name       = azurerm_storage_account.function.name
+  storage_account_access_key = azurerm_storage_account.function.primary_access_key
+  
+  site_config {
+    application_stack {
+      python_version = "3.11"
+    }
+    
+    application_insights_connection_string = azurerm_application_insights.function.connection_string
+    application_insights_key               = azurerm_application_insights.function.instrumentation_key
+    
+    vnet_route_all_enabled = true
+    
+    cors {
+      allowed_origins = ["*"] # Adjust for your environment
+    }
   }
+  
+  app_settings = {
+    "FUNCTIONS_WORKER_RUNTIME"    = "python"
+    "AzureWebJobsDisableHomepage" = "true"
+    "STAGE"                       = var.stage
+    "AAD_B2C_TENANT_ID"           = var.aad_b2c_tenant_id
+    "AAD_B2C_APPLICATION_ID"      = var.aad_b2c_application_id
+  }
+  
+  identity {
+    type = "SystemAssigned"
+  }
+  
+  virtual_network_subnet_id = var.subnet_id
 
-  depends_on = [aws_lambda_permission.s3_invoke_lambda_document_processor]
+  tags = {
+    Name = local.auth_handler_name
+  }
 }
 
+# ===================================================================
+# Key Vault Access Policies for Function Apps
+# ===================================================================
+
+resource "azurerm_key_vault_access_policy" "document_processor" {
+  key_vault_id = var.key_vault_id
+  tenant_id    = azurerm_linux_function_app.document_processor.identity[0].tenant_id
+  object_id    = azurerm_linux_function_app.document_processor.identity[0].principal_id
+  
+  secret_permissions = [
+    "Get", "List"
+  ]
+}
+
+resource "azurerm_key_vault_access_policy" "query_processor" {
+  key_vault_id = var.key_vault_id
+  tenant_id    = azurerm_linux_function_app.query_processor.identity[0].tenant_id
+  object_id    = azurerm_linux_function_app.query_processor.identity[0].principal_id
+  
+  secret_permissions = [
+    "Get", "List"
+  ]
+}
+
+resource "azurerm_key_vault_access_policy" "upload_handler" {
+  key_vault_id = var.key_vault_id
+  tenant_id    = azurerm_linux_function_app.upload_handler.identity[0].tenant_id
+  object_id    = azurerm_linux_function_app.upload_handler.identity[0].principal_id
+  
+  secret_permissions = [
+    "Get", "List"
+  ]
+}
+
+resource "azurerm_key_vault_access_policy" "db_init" {
+  key_vault_id = var.key_vault_id
+  tenant_id    = azurerm_linux_function_app.db_init.identity[0].tenant_id
+  object_id    = azurerm_linux_function_app.db_init.identity[0].principal_id
+  
+  secret_permissions = [
+    "Get", "List"
+  ]
+}
+
+# ==========================
+# Application Insights
+# ==========================
+
+resource "azurerm_log_analytics_workspace" "function" {
+  name                = "${local.name}-log-analytics"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+
+  tags = local.common_tags
+}
+
+resource "azurerm_application_insights" "function" {
+  name                = "${local.name}-app-insights"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  workspace_id        = azurerm_log_analytics_workspace.function.id
+  application_type    = "web"
+
+  tags = local.common_tags
+}
+
+# ==========================
+# Function Keys
+# ==========================
+
+# Note: In Azure, function keys are auto-generated and usually retrieved via REST API
+# This is a placeholder for the output - in real deployment, you'd use Azure CLI or Rest API
+resource "null_resource" "function_keys" {
+  triggers = {
+    document_processor_id = azurerm_linux_function_app.document_processor.id
+    query_processor_id    = azurerm_linux_function_app.query_processor.id
+    upload_handler_id     = azurerm_linux_function_app.upload_handler.id
+    db_init_id            = azurerm_linux_function_app.db_init.id
+    auth_handler_id       = azurerm_linux_function_app.auth_handler.id
+  }
+  
+  # In actual implementation, you might use a provisioner to get keys
+  # Or use data sources if available
+}

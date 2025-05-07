@@ -1,5 +1,7 @@
+# modules/storage/main.tf
+
 # ================================================
-# Storage Module for RAG System (S3 + DynamoDB)
+# Storage Module for RAG System (Blob + Cosmos DB)
 # ================================================
 # Provisions secure document storage and metadata store with best practices
 
@@ -8,7 +10,10 @@
 # ==============================
 
 locals {
-  bucket_name = "${var.project_name}-${var.stage}-documents"
+  documents_storage_name = "${var.project_name}${var.stage}docs"
+  metadata_cosmos_name = "${var.project_name}${var.stage}metadata"
+  documents_container_name = "documents"
+  metadata_container_name = "metadata"
 
   common_tags = {
     Project     = var.project_name
@@ -18,133 +23,120 @@ locals {
 }
 
 # ==============================
-# Document Storage - S3 bucket
+# Document Storage - Blob Storage
 # ==============================
 
-resource "aws_s3_bucket" "documents" {
-  bucket = local.bucket_name
+resource "azurerm_storage_account" "documents" {
+  name                     = local.documents_storage_name
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  min_tls_version          = "TLS1_2"
   
   tags = {
-    Name = local.bucket_name
+    Name = local.documents_storage_name
     Environment = var.stage
   }
   
-  # Prevent destruction of existing buckets
+  # Prevent destruction of existing storage accounts
   lifecycle {
     prevent_destroy = true
   }
 }
 
-resource "aws_s3_bucket_server_side_encryption_configuration" "documents" {
-  bucket = aws_s3_bucket.documents.id
+resource "azurerm_storage_container" "documents" {
+  name                  = local.documents_container_name
+  storage_account_name  = azurerm_storage_account.documents.name
+  container_access_type = "private"
+}
+
+# Azure Blob Storage lifecycle management policy
+resource "azurerm_storage_management_policy" "documents" {
+  count              = var.enable_lifecycle_rules ? 1 : 0
+  storage_account_id = azurerm_storage_account.documents.id
 
   rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_cors_configuration" "documents" {
-  bucket = aws_s3_bucket.documents.id
-
-  cors_rule {
-    allowed_headers = ["*"]
-    allowed_methods = ["GET", "POST", "PUT"]
-    allowed_origins = ["*"]
-    max_age_seconds = 3000
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "documents" {
-  bucket = aws_s3_bucket.documents.id
-  
-  rule {
-    id = "archive-old-documents"
-    status = "Enabled"
-    
-    filter {
-      prefix = ""  # applies lifecycle rule to entire bucket
-    }
-
-    
-    transition {
-      days = 90
-      storage_class = "STANDARD_IA"
-    }
-    
-    transition {
-      days = 365
-      storage_class = "GLACIER"
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "documents" {
-  bucket                  = aws_s3_bucket.documents.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# ==============================
-# DynamoDB for metadata storage
-# ==============================
-
-locals {
-  table_name = "${var.project_name}-${var.stage}-metadata"
-}
-
-# DynamoDB for metadata storage
-resource "aws_dynamodb_table" "metadata" {
-  name         = local.table_name
-  billing_mode = "PAY_PER_REQUEST"  # Serverless - pay only for what you use
-  hash_key     = "id"
-  
-  # Only define attributes used in key schemas
-  attribute {
-    name = "id"
-    type = "S"
-  }
-  
-  attribute {
-    name = "user_id"
-    type = "S"
-  }
-  
-  attribute {
-    name = "document_id"
-    type = "S"
-  }
-  
-  global_secondary_index {
-    name               = "UserIndex"
-    hash_key           = "user_id"
-    projection_type    = "ALL"
-  }
-  
-  global_secondary_index {
-    name               = "DocumentIndex"
-    hash_key           = "document_id"
-    projection_type    = "ALL"
-  }
-  
-  point_in_time_recovery {
+    name    = "archive-old-documents"
     enabled = true
+    filters {
+      prefix_match = ["${local.documents_container_name}/"]
+      blob_types   = ["blockBlob"]
+    }
+    actions {
+      base_blob {
+        tier_to_cool_after_days_since_modification_greater_than    = var.standard_ia_transition_days
+        tier_to_archive_after_days_since_modification_greater_than = var.archive_transition_days
+      }
+    }
+  }
+}
+
+# ==============================
+# Cosmos DB for metadata storage
+# ==============================
+
+resource "azurerm_cosmosdb_account" "metadata" {
+  name                = local.metadata_cosmos_name
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
+  
+  consistency_policy {
+    consistency_level       = "Session"
+    max_interval_in_seconds = 5
+    max_staleness_prefix    = 100
   }
   
-  server_side_encryption {
-    enabled = false
+  geo_location {
+    location          = var.location
+    failover_priority = 0
+  }
+  
+  capabilities {
+    name = "EnableServerless"
   }
   
   tags = {
-    Name = local.table_name
+    Name = local.metadata_cosmos_name
     Environment = var.stage
   }
   
-  # Prevent destruction of existing tables
+  # Prevent destruction of existing accounts
   lifecycle {
     prevent_destroy = true
+  }
+}
+
+resource "azurerm_cosmosdb_sql_database" "metadata" {
+  name                = "ragapp"
+  resource_group_name = var.resource_group_name
+  account_name        = azurerm_cosmosdb_account.metadata.name
+}
+
+resource "azurerm_cosmosdb_sql_container" "metadata" {
+  name                = local.metadata_container_name
+  resource_group_name = var.resource_group_name
+  account_name        = azurerm_cosmosdb_account.metadata.name
+  database_name       = azurerm_cosmosdb_sql_database.metadata.name
+  partition_key_path  = "/id"
+  
+  # Configure indexing policy for efficient queries
+  indexing_policy {
+    indexing_mode = "consistent"
+    
+    included_path {
+      path = "/*"
+    }
+    
+    excluded_path {
+      path = "/\"_etag\"/?"
+    }
+  }
+  
+  # Add a unique key for document IDs
+  unique_key {
+    paths = ["/document_id"]
   }
 }
