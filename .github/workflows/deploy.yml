@@ -280,17 +280,24 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
   
-      - name: Initialize Terraform Backend
+      - name: Terraform Init with Backend Config
         working-directory: environments/${{ needs.determine_environment.outputs.environment }}
         run: |
           # First initialize without backend config (uses local state)
           terraform init -backend=false
           
-          # Create backend resources using local state
+          # Create backend resources using local state if they don't exist
+          # This will create the tfstate storage if it doesn't exist
           terraform apply -auto-approve -target=azurerm_resource_group.tfstate -target=azurerm_storage_account.tfstate -target=azurerm_storage_container.tfstate
           
-          # Now reinitialize with backend config
-          terraform init -reconfigure
+          # Now initialize with the backend config provided via CLI
+          STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+          terraform init \
+            -backend-config="resource_group_name=${{ needs.determine_environment.outputs.resource_group }}" \
+            -backend-config="storage_account_name=${{ needs.determine_environment.outputs.storage_account }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${STAGE}/terraform.tfstate" \
+            -reconfigure
 
       - name: Terraform Init
         working-directory: environments/${{ needs.determine_environment.outputs.environment }}
