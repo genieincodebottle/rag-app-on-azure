@@ -82,7 +82,13 @@ fi
 # ----------------------------------------
 # Storage Account
 # ----------------------------------------
-DOCUMENTS_STORAGE="${PROJECT_NAME}${STAGE}docs"
+DOCUMENTS_STORAGE="${PROJECT_NAME}${STAGE}tfstate"
+# Ensure storage account name is valid (lowercase alphanumeric, 3-24 chars)
+DOCUMENTS_STORAGE_VALID=$(echo "$DOCUMENTS_STORAGE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+if [ "$STORAGE_ACCOUNT" != "$DOCUMENTS_STORAGE_VALID" ]; then
+  echo "Warning: Sanitized storage account name from '$STORAGE_ACCOUNT' to '$DOCUMENTS_STORAGE_VALID'"
+  DOCUMENTS_STORAGE="$DOCUMENTS_STORAGE_VALID"
+fi
 echo -e "${YELLOW}Checking Storage Account: ${DOCUMENTS_STORAGE}${NC}"
 if az storage account show --name "${DOCUMENTS_STORAGE}" --resource-group "${RESOURCE_GROUP}" &>/dev/null; then
   echo -e "${GREEN}Storage Account exists, checking state...${NC}"
