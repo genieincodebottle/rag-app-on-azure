@@ -280,6 +280,18 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
   
+      - name: Initialize Terraform Backend
+        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        run: |
+          # First initialize without backend config (uses local state)
+          terraform init -backend=false
+          
+          # Create backend resources using local state
+          terraform apply -auto-approve -target=azurerm_resource_group.tfstate -target=azurerm_storage_account.tfstate -target=azurerm_storage_container.tfstate
+          
+          # Now reinitialize with backend config
+          terraform init -reconfigure
+
       - name: Terraform Init
         working-directory: environments/${{ needs.determine_environment.outputs.environment }}
         run: terraform init
