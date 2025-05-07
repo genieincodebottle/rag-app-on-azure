@@ -239,13 +239,22 @@ jobs:
           STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
           CONTAINER_NAME="functions"
           RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
-
+      
+          # Login to Azure using service principal credentials
+          az login --service-principal \
+            --username ${{ env.ARM_CLIENT_ID }} \
+            --password ${{ env.ARM_CLIENT_SECRET }} \
+            --tenant ${{ env.ARM_TENANT_ID }}
+          
+          # Set the subscription
+          az account set --subscription ${{ env.ARM_SUBSCRIPTION_ID }}
+          
           # Ensure Resource Group exists
           az group create --name $RESOURCE_GROUP --location $LOCATION
           
           # Ensure Storage Account exists
           az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob --kind StorageV2
-
+      
           # Ensure Container exists
           az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT
           
@@ -257,7 +266,7 @@ jobs:
             FILENAME=$(basename $ZIP_FILE)
             az storage blob upload --account-name $STORAGE_ACCOUNT --container-name $CONTAINER_NAME --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY
           done
-          
+        
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
