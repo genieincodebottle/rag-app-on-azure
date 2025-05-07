@@ -1,5 +1,5 @@
 azure-functions
-azure-storage-blob6.0
+azure-storage-blob
 azure-cosmos
 azure-identity
 azure-keyvault-secrets
