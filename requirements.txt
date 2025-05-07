@@ -4,7 +4,7 @@ azure-cosmos
 azure-identity
 azure-keyvault-secrets
 psycopg2-binary0
-google-ai-generativelanguage
+google-genai
 langchain
 langchain-community
 pypdf
