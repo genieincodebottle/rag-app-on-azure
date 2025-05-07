@@ -272,7 +272,7 @@ jobs:
           # Upload Function ZIP files
           for ZIP_FILE in function_artifacts/*.zip; do
             FILENAME=$(basename $ZIP_FILE)
-            az storage blob upload --account-name ${{ needs.determine_environment.outputs.storage_account }} --container-name ${{ needs.determine_environment.outputs.container_name }} --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY
+            az storage blob upload --account-name ${{ needs.determine_environment.outputs.storage_account }} --container-name ${{ needs.determine_environment.outputs.container_name }} --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY --overwrite true
           done
         
       - name: Setup Terraform
