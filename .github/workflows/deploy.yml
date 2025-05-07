@@ -41,6 +41,7 @@ env:
   ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  STAGE: dev
 
 permissions:
   id-token: write
@@ -227,24 +228,53 @@ jobs:
           cd ../..
 
       - name: Create Azure Resource Group and Storage for Terraform State
+        shell: bash # Ensure bash is used for variable expansion consistency
         run: |
-          az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
-          az account set --subscription $ARM_SUBSCRIPTION_ID
+          echo "Logging in with Service Principal..."
+          az login --service-principal -u "$ARM_CLIENT_ID" -p "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID"
+          
+          echo "Setting active subscription: $ARM_SUBSCRIPTION_ID"
+          az account set --subscription "$ARM_SUBSCRIPTION_ID"
       
           echo "Verifying current subscription..."
           az account show
       
+          # Ensure the Microsoft.Storage resource provider is registered
+          echo "Registering Microsoft.Storage provider if not already registered..."
+          az provider show --namespace Microsoft.Storage --query registrationState -o tsv | grep -q Registered || az provider register --namespace Microsoft.Storage --wait
+          # You might want to do the same for Microsoft.Resources if group creation ever fails
+          # az provider show --namespace Microsoft.Resources --query registrationState -o tsv | grep -q Registered || az provider register --namespace Microsoft.Resources --wait
+
           RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-tfstate-rg"
-          echo "Creating Resource Group $RESOURCE_GROUP if it doesn't exist..."
-          az group create --name $RESOURCE_GROUP --location $LOCATION
+          echo "Creating Resource Group $RESOURCE_GROUP in location $LOCATION if it doesn't exist..."
+          az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --subscription "$ARM_SUBSCRIPTION_ID"
       
           STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}tfstate"
-          echo "Creating Storage Account $STORAGE_ACCOUNT if it doesn't exist..."
-          az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob
+          # Ensure storage account name is valid (lowercase alphanumeric, 3-24 chars)
+          STORAGE_ACCOUNT_VALID=$(echo "$STORAGE_ACCOUNT" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+          if [ "$STORAGE_ACCOUNT" != "$STORAGE_ACCOUNT_VALID" ]; then
+            echo "Warning: Sanitized storage account name from '$STORAGE_ACCOUNT' to '$STORAGE_ACCOUNT_VALID'"
+            STORAGE_ACCOUNT="$STORAGE_ACCOUNT_VALID"
+          fi
+          if [ ${#STORAGE_ACCOUNT} -lt 3 ]; then
+            echo "Error: Storage account name '$STORAGE_ACCOUNT' is too short after sanitization. Must be at least 3 characters."
+            exit 1
+          fi
+
+          echo "Creating Storage Account $STORAGE_ACCOUNT in RG $RESOURCE_GROUP if it doesn't exist..."
+          az storage account create --name "$STORAGE_ACCOUNT" \
+            --resource-group "$RESOURCE_GROUP" \
+            --subscription "$ARM_SUBSCRIPTION_ID" \
+            --sku Standard_LRS \
+            --encryption-services blob
       
-          echo "Creating Storage Container for Terraform State..."
-          az storage container create --name tfstate --account-name $STORAGE_ACCOUNT
-              
+          echo "Creating Storage Container 'tfstate' in account $STORAGE_ACCOUNT..."
+          # Get storage account key (safer to use connection string or RBAC for access if possible long term)
+          # For container creation here, using account key is common for automation bootstrap
+          ACCOUNT_KEY=$(az storage account keys list --resource-group "$RESOURCE_GROUP" --account-name "$STORAGE_ACCOUNT" --subscription "$ARM_SUBSCRIPTION_ID" --query '[0].value' -o tsv)
+          az storage container create --name tfstate --account-name "$STORAGE_ACCOUNT" --account-key "$ACCOUNT_KEY"
+          # Alternatively, if the SP has data plane RBAC roles (e.g., "Storage Blob Data Contributor") on the storage account:
+          # az storage container create --name tfstate --account-name "$STORAGE_ACCOUNT" --auth-mode login
                 
       - name: Download Function artifacts
         uses: actions/download-artifact@v4
