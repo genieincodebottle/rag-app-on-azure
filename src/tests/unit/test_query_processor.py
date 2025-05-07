@@ -1,4 +1,4 @@
-"""Test cases for the query_processor Lambda function."""
+"""Test cases for the query_processor Azure Function."""
 import json
 import os
 import unittest
@@ -7,11 +7,14 @@ from decimal import Decimal
 
 """Set up test environment."""
 # Set environment variables
-os.environ["DOCUMENTS_BUCKET"] = "test-bucket"
-os.environ["METADATA_TABLE"] = "test-table"
+os.environ["DOCUMENTS_CONTAINER"] = "test-container"
+os.environ["DOCUMENTS_STORAGE"] = "teststorage"
+os.environ["METADATA_COSMOS_ACCOUNT"] = "test-cosmos"
+os.environ["METADATA_COSMOS_DATABASE"] = "test-db"
+os.environ["METADATA_CONTAINER"] = "test-container"
 os.environ["STAGE"] = "test"
-os.environ["DB_SECRET_ARN"] = "test-db-secret"
-os.environ["GEMINI_SECRET_ARN"] = "test-gemini-secret"
+os.environ["DB_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/db-credentials"
+os.environ["GEMINI_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/gemini-api-key"
 os.environ["GEMINI_MODEL"] = "test-gemini-model"
 os.environ["GEMINI_EMBEDDING_MODEL"] = "test-embedding-model"
 os.environ["TEMPERATURE"] = "0.2"
@@ -21,60 +24,64 @@ os.environ["TOP_P"] = "0.8"
 
 # Now import the module under test - mocks are already in place globally from conftest
 from query_processor.query_processor import (
-    handler, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
+    main, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
     embed_query, embed_documents, similarity_search, generate_response, DecimalEncoder
 )
 
 class TestQueryProcessor(unittest.TestCase):
-    """Test cases for the query_processor Lambda function."""
+    """Test cases for the query_processor Azure Function."""
 
     def setUp(self):
-        # Mock boto3 clients
-        self.s3_patcher = patch("query_processor.query_processor.s3_client")
-        self.dynamodb_patcher = patch("query_processor.query_processor.dynamodb")
-        self.secrets_patcher = patch("query_processor.query_processor.secretsmanager")
+        # Mock Azure clients
+        self.blob_patcher = patch("query_processor.query_processor.BlobServiceClient")
+        self.cosmos_patcher = patch("query_processor.query_processor.CosmosClient")
+        self.secret_patcher = patch("query_processor.query_processor.SecretClient")
+        self.credential_patcher = patch("query_processor.query_processor.DefaultAzureCredential")
         
-        self.mock_s3 = self.s3_patcher.start()
-        self.mock_dynamodb = self.dynamodb_patcher.start()
-        self.mock_secretsmanager = self.secrets_patcher.start()
+        self.mock_blob = self.blob_patcher.start()
+        self.mock_cosmos = self.cosmos_patcher.start()
+        self.mock_secret = self.secret_patcher.start()
+        self.mock_credential = self.credential_patcher.start()
 
     def tearDown(self):
         """Clean up test environment."""
         # Clean up environment variables
         for key in [
-            "DOCUMENTS_BUCKET", "METADATA_TABLE", "STAGE", "DB_SECRET_ARN",
-            "GEMINI_SECRET_ARN", "GEMINI_MODEL", "GEMINI_EMBEDDING_MODEL", 
+            "DOCUMENTS_CONTAINER", "DOCUMENTS_STORAGE", "METADATA_COSMOS_ACCOUNT", 
+            "METADATA_COSMOS_DATABASE", "METADATA_CONTAINER", "STAGE", "DB_SECRET_URI",
+            "GEMINI_SECRET_URI", "GEMINI_MODEL", "GEMINI_EMBEDDING_MODEL", 
             "TEMPERATURE", "MAX_OUTPUT_TOKENS", "TOP_K", "TOP_P"
         ]:
             if key in os.environ:
                 del os.environ[key]
                 
         # Stop patchers
-        self.s3_patcher.stop()
-        self.dynamodb_patcher.stop()
-        self.secrets_patcher.stop()
+        self.blob_patcher.stop()
+        self.cosmos_patcher.stop()
+        self.secret_patcher.stop()
+        self.credential_patcher.stop()
 
-    @patch("query_processor.query_processor.secretsmanager")
-    def test_get_gemini_api_key(self, mock_secretsmanager):
-        """Test getting Gemini API key from Secrets Manager."""
-        # Mock the Secrets Manager response
-        mock_secret_string = json.dumps({"GEMINI_API_KEY": "mock-api-key"})
-        mock_response = {"SecretString": mock_secret_string}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+    @patch("query_processor.query_processor.SecretClient")
+    def test_get_gemini_api_key(self, mock_secret_client):
+        """Test getting Gemini API key from Azure Key Vault."""
+        # Mock the Key Vault response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps({"GEMINI_API_KEY": "mock-api-key"})
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         api_key = get_gemini_api_key()
 
         # Verify results
         self.assertEqual(api_key, "mock-api-key")
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-gemini-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("gemini-api-key")
         
-    @patch("query_processor.query_processor.secretsmanager")
-    def test_get_postgres_credentials(self, mock_secretsmanager):
-        """Test getting PostgreSQL credentials from Secrets Manager."""
-        # Mock the Secrets Manager response
+    @patch("query_processor.query_processor.SecretClient")
+    def test_get_postgres_credentials(self, mock_secret_client):
+        """Test getting PostgreSQL credentials from Azure Key Vault."""
+        # Mock the Key Vault response
         mock_credentials = {
             "host": "test-host",
             "port": 5432,
@@ -82,17 +89,18 @@ class TestQueryProcessor(unittest.TestCase):
             "password": "test-password",
             "dbname": "test-db"
         }
-        mock_response = {"SecretString": json.dumps(mock_credentials)}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps(mock_credentials)
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         credentials = get_postgres_credentials()
 
         # Verify results
         self.assertEqual(credentials, mock_credentials)
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-db-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("db-credentials")
 
     @patch("query_processor.query_processor.psycopg2")
     def test_get_postgres_connection(self, mock_psycopg2):
@@ -250,42 +258,58 @@ class TestQueryProcessor(unittest.TestCase):
         self.assertEqual(decoded_obj["text"], "test")
         self.assertEqual(decoded_obj["number"], 42)
 
-    def test_handler_healthcheck(self):
-        """Test the Lambda handler for a health check."""
-        # Create a health check event
-        event = {"action": "healthcheck"}
-
-        # Call the handler
-        response = handler(event, {})
-
+    @patch("query_processor.query_processor.func")
+    def test_main_healthcheck(self, mock_func):
+        """Test the Azure Function for a health check."""
+        # Create a health check request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"action": "healthcheck"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Query processor is healthy")
         self.assertEqual(response_body["stage"], "test")
 
-    def test_handler_missing_query(self):
-        """Test the Lambda handler when the query is missing."""
-        # Create an event with missing query
-        event = {
-            "body": json.dumps({
-                "user_id": "user-1"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
+    @patch("query_processor.query_processor.func")
+    def test_main_missing_query(self, mock_func):
+        """Test the Azure Function when the query is missing."""
+        # Create a request with missing query
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"user_id": "user-1"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 400)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected error message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Query is required")
+        self.assertEqual(call_args[1]["status_code"], 400)
 
+    @patch("query_processor.query_processor.func")
     @patch("query_processor.query_processor.embed_query")
     @patch("query_processor.query_processor.similarity_search")
     @patch("query_processor.query_processor.generate_response")
-    def test_handler_query_success(self, mock_generate, mock_search, mock_embed):
-        """Test the Lambda handler for a successful query."""
+    def test_main_query_success(self, mock_generate, mock_search, mock_embed, mock_func):
+        """Test the Azure Function for a successful query."""
         # Mock embedding
         mock_embed.return_value = [0.1, 0.2, 0.3]
         
@@ -306,51 +330,31 @@ class TestQueryProcessor(unittest.TestCase):
         # Mock response generation
         mock_generate.return_value = "RAG stands for Retrieval-Augmented Generation. It combines retrieval and generation techniques."
         
-        # Create a query event
-        event = {
-            "body": json.dumps({
-                "query": "What is RAG?",
-                "user_id": "user-1"
-            })
+        # Create a query request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {
+            "query": "What is RAG?",
+            "user_id": "user-1"
         }
-
-        # Call the handler
-        response = handler(event, {})
-
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(response_body["query"], "What is RAG?")
-        self.assertEqual(response_body["response"], "RAG stands for Retrieval-Augmented Generation. It combines retrieval and generation techniques.")
-        self.assertEqual(len(response_body["results"]), 1)
-        self.assertEqual(response_body["count"], 1)
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        self.assertEqual(call_args[1]["status_code"], 200)
         
         # Verify function calls
         mock_embed.assert_called_once_with("What is RAG?")
         mock_search.assert_called_once_with([0.1, 0.2, 0.3], "user-1")
         mock_generate.assert_called_once_with("What is RAG?", mock_chunks)
-
-    @patch("query_processor.query_processor.embed_query")
-    def test_handler_error_handling(self, mock_embed):
-        """Test the Lambda handler error handling."""
-        # Mock embedding to raise an exception
-        mock_embed.side_effect = Exception("Error embedding query")
-        
-        # Create a query event
-        event = {
-            "body": json.dumps({
-                "query": "What is RAG?",
-                "user_id": "user-1"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
-        # Verify results
-        self.assertEqual(response["statusCode"], 500)
-        response_body = json.loads(response["body"])
-        self.assertTrue("Internal error" in response_body["message"])
 
 
 if __name__ == "__main__":

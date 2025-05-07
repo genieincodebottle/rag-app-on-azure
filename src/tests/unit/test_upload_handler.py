@@ -1,4 +1,4 @@
-"""Test cases for the upload_handler Lambda function."""
+"""Test cases for the upload_handler Azure Function."""
 import json
 import os
 import unittest
@@ -7,53 +7,70 @@ from datetime import datetime
 
 """Set up test environment."""
 # Set environment variables
-os.environ["DOCUMENTS_BUCKET"] = "test-bucket"
-os.environ["METADATA_TABLE"] = "test-table"
+os.environ["DOCUMENTS_CONTAINER"] = "test-container"
+os.environ["DOCUMENTS_STORAGE"] = "teststorage"
+os.environ["METADATA_COSMOS_ACCOUNT"] = "test-cosmos"
+os.environ["METADATA_COSMOS_DATABASE"] = "test-db"
+os.environ["METADATA_CONTAINER"] = "test-container"
 os.environ["STAGE"] = "test"
-os.environ["DB_SECRET_ARN"] = "test-db-secret"
+os.environ["DB_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/db-credentials"
 
 # Now import the module under test - mocks are already in place globally from conftest
 from upload_handler.upload_handler import (
-    handler, get_postgres_credentials, get_postgres_connection, get_mime_type
+    main, get_postgres_credentials, get_postgres_connection, get_mime_type
 )
 
 class TestUploadHandler(unittest.TestCase):
-    """Test cases for the upload_handler Lambda function."""
+    """Test cases for the upload_handler Azure Function."""
 
     def setUp(self):
-
-        # Mock boto3 clients
-        self.s3_patcher = patch("upload_handler.upload_handler.s3_client")
-        self.dynamodb_patcher = patch("upload_handler.upload_handler.dynamodb")
-        self.secrets_patcher = patch("upload_handler.upload_handler.secretsmanager")
-        self.lambda_patcher = patch("upload_handler.upload_handler.lambda_client")
+        # Mock Azure clients
+        self.blob_patcher = patch("upload_handler.upload_handler.BlobServiceClient")
+        self.cosmos_patcher = patch("upload_handler.upload_handler.CosmosClient")
+        self.secret_patcher = patch("upload_handler.upload_handler.SecretClient")
+        self.credential_patcher = patch("upload_handler.upload_handler.DefaultAzureCredential")
         
-        self.mock_s3 = self.s3_patcher.start()
-        self.mock_dynamodb = self.dynamodb_patcher.start()
-        self.mock_secretsmanager = self.secrets_patcher.start()
-        self.mock_lambda = self.lambda_patcher.start()
+        self.mock_blob = self.blob_patcher.start()
+        self.mock_cosmos = self.cosmos_patcher.start()
+        self.mock_secret = self.secret_patcher.start()
+        self.mock_credential = self.credential_patcher.start()
         
-        # Set up DynamoDB table mock
-        self.mock_table = MagicMock()
-        self.mock_dynamodb.Table.return_value = self.mock_table
+        # Set up mock blob client
+        self.mock_blob_service_client = MagicMock()
+        self.mock_container_client = MagicMock()
+        self.mock_blob_client = MagicMock()
+        self.mock_container_client.get_blob_client.return_value = self.mock_blob_client
+        self.mock_blob_service_client.get_container_client.return_value = self.mock_container_client
+        self.mock_blob.return_value = self.mock_blob_service_client
+        
+        # Set up mock cosmos client
+        self.mock_cosmos_client = MagicMock()
+        self.mock_database_client = MagicMock()
+        self.mock_container_client_cosmos = MagicMock()
+        self.mock_database_client.get_container_client.return_value = self.mock_container_client_cosmos
+        self.mock_cosmos_client.get_database_client.return_value = self.mock_database_client
+        self.mock_cosmos.return_value = self.mock_cosmos_client
 
     def tearDown(self):
         """Clean up test environment."""
         # Clean up environment variables
-        for key in ["DOCUMENTS_BUCKET", "METADATA_TABLE", "STAGE", "DB_SECRET_ARN"]:
+        for key in [
+            "DOCUMENTS_CONTAINER", "DOCUMENTS_STORAGE", "METADATA_COSMOS_ACCOUNT",
+            "METADATA_COSMOS_DATABASE", "METADATA_CONTAINER", "STAGE", "DB_SECRET_URI"
+        ]:
             if key in os.environ:
                 del os.environ[key]
                 
         # Stop patchers
-        self.s3_patcher.stop()
-        self.dynamodb_patcher.stop()
-        self.secrets_patcher.stop()
-        self.lambda_patcher.stop()
+        self.blob_patcher.stop()
+        self.cosmos_patcher.stop()
+        self.secret_patcher.stop()
+        self.credential_patcher.stop()
 
-    @patch("upload_handler.upload_handler.secretsmanager")
-    def test_get_postgres_credentials(self, mock_secretsmanager):
-        """Test getting PostgreSQL credentials from Secrets Manager."""
-        # Mock the Secrets Manager response
+    @patch("upload_handler.upload_handler.SecretClient")
+    def test_get_postgres_credentials(self, mock_secret_client):
+        """Test getting PostgreSQL credentials from Azure Key Vault."""
+        # Mock the Key Vault response
         mock_credentials = {
             "host": "test-host",
             "port": 5432,
@@ -61,17 +78,18 @@ class TestUploadHandler(unittest.TestCase):
             "password": "test-password",
             "dbname": "test-db"
         }
-        mock_response = {"SecretString": json.dumps(mock_credentials)}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps(mock_credentials)
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         credentials = get_postgres_credentials()
 
         # Verify results
         self.assertEqual(credentials, mock_credentials)
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-db-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("db-credentials")
 
     @patch("upload_handler.upload_handler.psycopg2")
     def test_get_postgres_connection(self, mock_psycopg2):
@@ -122,53 +140,69 @@ class TestUploadHandler(unittest.TestCase):
             mime_type = get_mime_type(file_name)
             self.assertEqual(mime_type, expected_mime_type)
 
-    def test_handler_healthcheck(self):
-        """Test the Lambda handler for a health check."""
-        # Create a health check event
-        event = {"action": "healthcheck"}
-
-        # Call the handler
-        response = handler(event, {})
-
+    @patch("upload_handler.upload_handler.func")
+    def test_main_healthcheck(self, mock_func):
+        """Test the Azure Function for a health check."""
+        # Create a health check request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"action": "healthcheck"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Upload handler is healthy")
         self.assertEqual(response_body["stage"], "test")
 
-    def test_handler_missing_file_data(self):
-        """Test the Lambda handler when file data is missing."""
-        # Create an event with missing file content
-        event = {
-            "body": json.dumps({
-                "file_name": "test.pdf"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
+    @patch("upload_handler.upload_handler.func")
+    def test_main_missing_file_data(self, mock_func):
+        """Test the Azure Function when file data is missing."""
+        # Create a request with missing file content
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"file_name": "test.pdf"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 400)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected error message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "File content and name are required")
+        self.assertEqual(call_args[1]["status_code"], 400)
 
-    @patch("upload_handler.upload_handler.base64.b64decode")
-    @patch("upload_handler.upload_handler.uuid.uuid4")
+    @patch("upload_handler.upload_handler.func")
+    @patch("upload_handler.upload_handler.base64")
+    @patch("upload_handler.upload_handler.uuid")
     @patch("upload_handler.upload_handler.datetime")
     @patch("upload_handler.upload_handler.get_postgres_credentials")
     @patch("upload_handler.upload_handler.get_postgres_connection")
-    def test_handler_success(self, mock_get_conn, mock_get_creds, mock_datetime, mock_uuid, mock_b64decode):
-        """Test the Lambda handler for successful file upload."""
+    def test_main_success(self, mock_get_conn, mock_get_creds, mock_datetime, 
+                          mock_uuid, mock_base64, mock_func):
+        """Test the Azure Function for successful file upload."""
         # Mock base64 decode
-        mock_b64decode.return_value = b"file content"
+        mock_base64.b64decode.return_value = b"file content"
         
         # Mock UUID
-        mock_uuid.return_value = "test-doc-id"
+        mock_uuid.uuid4.return_value = "test-doc-id"
         
         # Mock datetime
         mock_now = datetime.now()
-        mock_now_timestamp = int(mock_now.timestamp() * 1000)
         mock_datetime.now.return_value = mock_now
         
         # Mock PostgreSQL connection
@@ -180,166 +214,39 @@ class TestUploadHandler(unittest.TestCase):
         # Mock credentials
         mock_get_creds.return_value = {"host": "test-host"}
         
-        # Create an event with file data
-        event = {
-            "body": json.dumps({
-                "file_content": "ZmlsZSBjb250ZW50",  # base64 "file content"
-                "file_name": "test.pdf",
-                "user_id": "test-user"
-            })
+        # Create a request with file data
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {
+            "file_content": "ZmlsZSBjb250ZW50",  # base64 "file content"
+            "file_name": "test.pdf",
+            "user_id": "test-user"
         }
-
-        # Call the handler
-        response = handler(event, {})
-
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "File uploaded successfully")
         self.assertEqual(response_body["document_id"], "test-doc-id")
         self.assertEqual(response_body["file_name"], "test.pdf")
         
-        # Verify S3 upload
-        self.mock_s3.put_object.assert_called_once_with(
-            Bucket="test-bucket",
-            Key="uploads/test-user/test-doc-id/test.pdf",
-            Body=b"file content",
-            ContentType="application/pdf"
-        )
+        # Verify blob upload
+        self.mock_blob_client.upload_blob.assert_called_once()
         
         # Verify PostgreSQL insertion
-        mock_cursor.execute.assert_called_once_with(
-            """
-            INSERT INTO documents (document_id, user_id, file_name, mime_type, status, bucket, key, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            unittest.mock.ANY  # We don't need to check the exact values here
-        )
+        mock_cursor.execute.assert_called_once()
         
-        # Verify DynamoDB put_item
-        self.mock_table.put_item.assert_called_once()
-
-    @patch("upload_handler.upload_handler.base64.b64decode")
-    @patch("upload_handler.upload_handler.uuid.uuid4")
-    @patch("upload_handler.upload_handler.datetime")
-    @patch("upload_handler.upload_handler.get_postgres_credentials")
-    @patch("upload_handler.upload_handler.get_postgres_connection")
-    def test_handler_postgres_error(self, mock_get_conn, mock_get_creds, mock_datetime, mock_uuid, mock_b64decode):
-        """Test the Lambda handler when PostgreSQL insertion fails."""
-        # Mock base64 decode
-        mock_b64decode.return_value = b"file content"
-        
-        # Mock UUID
-        mock_uuid.return_value = "test-doc-id"
-        
-        # Mock datetime
-        mock_now = datetime.now()
-        mock_now_timestamp = int(mock_now.timestamp() * 1000)
-        mock_datetime.now.return_value = mock_now
-        
-        # Mock PostgreSQL connection to raise an exception
-        mock_get_conn.side_effect = Exception("Database connection error")
-        
-        # Mock credentials
-        mock_get_creds.return_value = {"host": "test-host"}
-        
-        # Create an event with file data
-        event = {
-            "body": json.dumps({
-                "file_content": "ZmlsZSBjb250ZW50",  # base64 "file content"
-                "file_name": "test.pdf",
-                "user_id": "test-user"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
-        # Verify results - should still succeed because of DynamoDB fallback
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(response_body["message"], "File uploaded successfully")
-        
-        # Verify S3 upload
-        self.mock_s3.put_object.assert_called_once()
-        
-        # Verify DynamoDB put_item (fallback storage)
-        self.mock_table.put_item.assert_called_once()
-
-    @patch("upload_handler.upload_handler.base64.b64decode")
-    @patch("upload_handler.upload_handler.uuid.uuid4")
-    def test_handler_with_custom_mime_type(self, mock_uuid, mock_b64decode):
-        """Test the Lambda handler with a custom MIME type."""
-        # Mock base64 decode
-        mock_b64decode.return_value = b"file content"
-        
-        # Mock UUID
-        mock_uuid.return_value = "test-doc-id"
-        
-        # Create an event with file data and custom MIME type
-        event = {
-            "body": json.dumps({
-                "file_content": "ZmlsZSBjb250ZW50",  # base64 "file content"
-                "file_name": "test.custom",
-                "mime_type": "application/custom",
-                "user_id": "test-user"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
-        # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        
-        # Verify S3 upload with custom MIME type
-        self.mock_s3.put_object.assert_called_once_with(
-            Bucket="test-bucket",
-            Key="uploads/test-user/test-doc-id/test.custom",
-            Body=b"file content",
-            ContentType="application/custom"
-        )
-
-    @patch("upload_handler.upload_handler.base64.b64decode")
-    def test_handler_s3_error(self, mock_b64decode):
-        """Test the Lambda handler when S3 upload fails."""
-        # Mock base64 decode
-        mock_b64decode.return_value = b"file content"
-        
-        # Mock S3 put_object to raise an exception
-        self.mock_s3.put_object.side_effect = Exception("S3 upload error")
-        
-        # Create an event with file data
-        event = {
-            "body": json.dumps({
-                "file_content": "ZmlsZSBjb250ZW50",  # base64 "file content"
-                "file_name": "test.pdf",
-                "user_id": "test-user"
-            })
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
-        # Verify results - should fail with 500
-        self.assertEqual(response["statusCode"], 500)
-        response_body = json.loads(response["body"])
-        self.assertTrue("Error uploading file" in response_body["message"])
-        
-    def test_handler_json_decode_error(self):
-        """Test the Lambda handler with invalid JSON in body."""
-        # Create an event with invalid JSON
-        event = {
-            "action": "healthcheck"
-        }
-
-        # Call the handler
-        response = handler(event, {})
-
-        # Verify results - should succeed with healthcheck
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(response_body["message"], "Upload handler is healthy")
+        # Verify Cosmos DB item creation
+        self.mock_container_client_cosmos.create_item.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,2 +1,11 @@
-boto3>=1.38.6
-psycopg2-binary>=2.9.10
+azure-functions
+azure-storage-blob6.0
+azure-cosmos
+azure-identity
+azure-keyvault-secrets
+psycopg2-binary0
+google-ai-generativelanguage
+langchain
+langchain-community
+pypdf
+requests

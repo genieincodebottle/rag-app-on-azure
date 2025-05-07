@@ -1,5 +1,5 @@
 """
-Global pytest configuration
+Global pytest configuration for Azure Function testing
 """
 import os
 import sys
@@ -22,24 +22,28 @@ if src_dir not in sys.path:
 # Environment Setup
 # ------------------------------------------------------------------------------
 
-# Set AWS default region for boto3
-os.environ['AWS_DEFAULT_REGION'] = 'us-east-1'
+# Set Azure region for testing
+os.environ['AZURE_REGION'] = 'eastus'
 
 # ------------------------------------------------------------------------------
 # Mock Setup
 # ------------------------------------------------------------------------------
 
-# Mock response for Secrets Manager
-mock_secret_response = MagicMock()
-mock_secret_response.return_value = {"SecretString": '{"GEMINI_API_KEY": "test-api-key"}'}
+# Mock Azure KeyVault response
+mock_key_vault_secret = MagicMock()
+mock_key_vault_secret.value = '{"GEMINI_API_KEY": "test-api-key"}'
 
-# Mock boto3
-mock_boto3 = MagicMock()
-mock_client = MagicMock()
-mock_resource = MagicMock()
-mock_client.get_secret_value = mock_secret_response
-mock_boto3.client.return_value = mock_client
-mock_boto3.resource.return_value = mock_resource
+# Mock Azure clients
+mock_blob_service_client = MagicMock()
+mock_cosmos_client = MagicMock()
+mock_secret_client = MagicMock()
+mock_secret_client.get_secret.return_value = mock_key_vault_secret
+
+# Mock Azure Identity DefaultAzureCredential
+mock_default_credential = MagicMock()
+
+# Mock Azure Functions
+mock_func = MagicMock()
 
 # Mock Google Gemini
 mock_google = MagicMock()
@@ -74,9 +78,17 @@ class MockDocument:
 # Module Injection into sys.modules
 # ------------------------------------------------------------------------------
 
-sys.modules['boto3'] = mock_boto3
-sys.modules['botocore'] = MagicMock()
-sys.modules['botocore.exceptions'] = MagicMock()
+sys.modules['azure.identity'] = MagicMock()
+sys.modules['azure.identity'].DefaultAzureCredential = mock_default_credential
+sys.modules['azure.keyvault.secrets'] = MagicMock()
+sys.modules['azure.keyvault.secrets'].SecretClient = mock_secret_client
+sys.modules['azure.storage.blob'] = MagicMock()
+sys.modules['azure.storage.blob'].BlobServiceClient = mock_blob_service_client
+sys.modules['azure.cosmos'] = MagicMock()
+sys.modules['azure.cosmos'].CosmosClient = mock_cosmos_client
+sys.modules['azure.cosmos'].PartitionKey = MagicMock()
+sys.modules['azure.functions'] = mock_func
+
 sys.modules['psycopg2'] = mock_psycopg2
 sys.modules['psycopg2.extensions'] = mock_psycopg2_extensions
 sys.modules['google'] = mock_google

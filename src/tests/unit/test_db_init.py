@@ -1,4 +1,3 @@
-# src/tests/unit/test_db_init.py
 """Test cases for the db_init Azure Function."""
 import json
 import os
@@ -20,19 +19,46 @@ from db_init.db_init import (
 )
 
 class TestDbInit(unittest.TestCase):
-    """Test cases for the db_init Lambda function."""
+    """Test cases for the db_init Azure Function."""
+
+    def setUp(self):
+        # Mock Azure clients
+        self.secret_patcher = patch("db_init.db_init.SecretClient")
+        self.credential_patcher = patch("db_init.db_init.DefaultAzureCredential")
+        
+        self.mock_secret = self.secret_patcher.start()
+        self.mock_credential = self.credential_patcher.start()
+        
+        # Mock Key Vault client
+        self.mock_secret_client = MagicMock()
+        self.mock_secret.return_value = self.mock_secret_client
+        
+        # Mock secret
+        self.mock_secret_value = MagicMock()
+        self.mock_secret_value.value = json.dumps({
+            "host": "test-host",
+            "port": 5432,
+            "username": "test-user",
+            "password": "test-password",
+            "dbname": "test-db"
+        })
+        self.mock_secret_client.get_secret.return_value = self.mock_secret_value
 
     def tearDown(self):
         """Clean up test environment."""
         # Clean up environment variables
-        for key in ["DB_SECRET_ARN", "STAGE", "MAX_RETRIES", "RETRY_DELAY"]:
+        for key in ["DB_SECRET_URI", "STAGE", "MAX_RETRIES", "RETRY_DELAY"]:
             if key in os.environ:
                 del os.environ[key]
+                
+        # Stop patchers
+        self.secret_patcher.stop()
+        self.credential_patcher.stop()
 
-    @patch("db_init.db_init.secretsmanager")
-    def test_get_postgres_credentials(self, mock_secretsmanager):
-        """Test getting PostgreSQL credentials from Secrets Manager."""
-        # Mock the Secrets Manager response
+    @patch("db_init.db_init.SecretClient")
+    def test_get_postgres_credentials(self, mock_secret_client):
+        """Test getting PostgreSQL credentials from Azure Key Vault."""
+        # Mock the Key Vault response
         mock_credentials = {
             "host": "test-host",
             "port": 5432,
@@ -40,17 +66,18 @@ class TestDbInit(unittest.TestCase):
             "password": "test-password",
             "dbname": "test-db"
         }
-        mock_response = {"SecretString": json.dumps(mock_credentials)}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps(mock_credentials)
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         credentials = get_postgres_credentials()
 
         # Verify results
         self.assertEqual(credentials, mock_credentials)
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-db-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("db-credentials")
 
     @patch("db_init.db_init.socket.gethostbyname")
     def test_check_dns_resolution_success(self, mock_gethostbyname):
@@ -283,11 +310,12 @@ class TestDbInit(unittest.TestCase):
         self.assertEqual(mock_psycopg2.connect.call_count, 4)  # Initial + 3 retries
         self.assertEqual(mock_sleep.call_count, 3)  # Sleep between retries
         
+    @patch("db_init.db_init.func")
     @patch("db_init.db_init.get_postgres_credentials")
     @patch("db_init.db_init.create_database_if_not_exists")
     @patch("db_init.db_init.initialize_database")
-    def test_handler_success(self, mock_initialize, mock_create_db, mock_get_creds):
-        """Test the Lambda handler for successful execution."""
+    def test_main_success(self, mock_initialize, mock_create_db, mock_get_creds, mock_func):
+        """Test the Azure Function for successful execution."""
         # Mock credential retrieval
         mock_credentials = {
             "host": "test-host",
@@ -302,23 +330,36 @@ class TestDbInit(unittest.TestCase):
         mock_create_db.return_value = True
         mock_initialize.return_value = True
         
-        # Call the handler
-        response = handler({}, {})
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Create a test request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {}
+        
+        # Call the function
+        response = main(mock_req)
         
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check response contains success message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Database initialization completed successfully")
+        self.assertEqual(call_args[1]["status_code"], 200)
         
         # Verify function calls
         mock_get_creds.assert_called_once()
         mock_create_db.assert_called_once_with(mock_credentials, "test-db")
         mock_initialize.assert_called_once_with(mock_credentials)
         
+    @patch("db_init.db_init.func")
     @patch("db_init.db_init.get_postgres_credentials")
     @patch("db_init.db_init.create_database_if_not_exists")
-    def test_handler_create_db_failure(self, mock_create_db, mock_get_creds):
-        """Test the Lambda handler when database creation fails."""
+    def test_main_create_db_failure(self, mock_create_db, mock_get_creds, mock_func):
+        """Test the Azure Function when database creation fails."""
         # Mock credential retrieval
         mock_credentials = {
             "host": "test-host",
@@ -332,22 +373,35 @@ class TestDbInit(unittest.TestCase):
         # Mock database creation failure
         mock_create_db.return_value = False
         
-        # Call the handler
-        response = handler({}, {})
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Create a test request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {}
+        
+        # Call the function
+        response = main(mock_req)
         
         # Verify results
-        self.assertEqual(response["statusCode"], 500)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check response contains failure message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(
             response_body["message"],
             "Failed to create database. Please check that the RDS instance is available."
         )
+        self.assertEqual(call_args[1]["status_code"], 500)
         
+    @patch("db_init.db_init.func")
     @patch("db_init.db_init.get_postgres_credentials")
     @patch("db_init.db_init.create_database_if_not_exists")
     @patch("db_init.db_init.initialize_database")
-    def test_handler_initialize_db_failure(self, mock_initialize, mock_create_db, mock_get_creds):
-        """Test the Lambda handler when database initialization fails."""
+    def test_main_initialize_db_failure(self, mock_initialize, mock_create_db, mock_get_creds, mock_func):
+        """Test the Azure Function when database initialization fails."""
         # Mock credential retrieval
         mock_credentials = {
             "host": "test-host",
@@ -362,31 +416,52 @@ class TestDbInit(unittest.TestCase):
         mock_create_db.return_value = True
         mock_initialize.return_value = False
         
-        # Call the handler
-        response = handler({}, {})
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Create a test request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {}
+        
+        # Call the function
+        response = main(mock_req)
         
         # Verify results
-        self.assertEqual(response["statusCode"], 500)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check response contains failure message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(
             response_body["message"],
             "Failed to initialize database schema. Please check logs for details."
         )
+        self.assertEqual(call_args[1]["status_code"], 500)
         
-    def test_handler_healthcheck(self):
-        """Test the Lambda handler for a health check."""
+    @patch("db_init.db_init.func")
+    def test_main_healthcheck(self, mock_func):
+        """Test the Azure Function for a health check."""
         # Override environment variable to ensure it's correct
         os.environ["STAGE"] = "test"
         
-        # Create a health check event
-        event = {"action": "healthcheck"}
-
-        # Call the handler
-        response = handler(event, {})
-
+        # Create a health check request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"action": "healthcheck"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check response contains health status
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "DB initialization function is healthy")
         self.assertEqual(response_body["stage"], "test")
 

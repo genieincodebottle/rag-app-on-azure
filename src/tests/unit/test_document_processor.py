@@ -1,16 +1,20 @@
-"""Test cases for the document_processor Lambda function."""
+"""Test cases for the document_processor Azure Function."""
 import json
 import os
 import unittest
 from unittest.mock import MagicMock, patch
+import tempfile
 
 """Set up test environment."""
 # Set environment variables
-os.environ["DOCUMENTS_BUCKET"] = "test-bucket"
-os.environ["METADATA_TABLE"] = "test-table"
+os.environ["DOCUMENTS_CONTAINER"] = "test-container"
+os.environ["DOCUMENTS_STORAGE"] = "teststorage"
+os.environ["METADATA_COSMOS_ACCOUNT"] = "test-cosmos"
+os.environ["METADATA_COSMOS_DATABASE"] = "test-db"
+os.environ["METADATA_CONTAINER"] = "test-container"
 os.environ["STAGE"] = "test"
-os.environ["DB_SECRET_ARN"] = "test-db-secret"
-os.environ["GEMINI_SECRET_ARN"] = "test-gemini-secret"
+os.environ["DB_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/db-credentials"
+os.environ["GEMINI_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/gemini-api-key"
 os.environ["GEMINI_EMBEDDING_MODEL"] = "test-embedding-model"
 os.environ["TEMPERATURE"] = "0.2"
 os.environ["MAX_OUTPUT_TOKENS"] = "1024"
@@ -20,67 +24,78 @@ os.environ["SIMILARITY_THRESHOLD"] = "0.7"
 
 # Now import the module under test - mocks are already in place globally from conftest
 from document_processor.document_processor import (
-    handler, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
+    main, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
     embed_query, embed_documents, get_document_loader, chunk_documents, process_document
 )
 
 class TestDocumentProcessor(unittest.TestCase):
-    """Test cases for the document_processor Lambda function."""
+    """Test cases for the document_processor Azure Function."""
 
     def setUp(self):
-        
-        # Mock boto3 clients
+        # Mock Azure clients
+        self.blob_patcher = patch('document_processor.document_processor.BlobServiceClient')
+        self.cosmos_patcher = patch("document_processor.document_processor.CosmosClient")
+        self.secret_patcher = patch("document_processor.document_processor.SecretClient")
+        self.credential_patcher = patch("document_processor.document_processor.DefaultAzureCredential")
         self.client_patcher = patch('document_processor.document_processor.client')
+        
+        self.mock_blob = self.blob_patcher.start()
+        self.mock_cosmos = self.cosmos_patcher.start()
+        self.mock_secret = self.secret_patcher.start()
+        self.mock_credential = self.credential_patcher.start()
         self.mock_client = self.client_patcher.start()
-        self.s3_patcher = patch("document_processor.document_processor.s3_client")
-        self.dynamodb_patcher = patch("document_processor.document_processor.dynamodb")
-        self.secrets_patcher = patch("document_processor.document_processor.secretsmanager")
         
-        self.mock_s3 = self.s3_patcher.start()
-        self.mock_dynamodb = self.dynamodb_patcher.start()
-        self.mock_secretsmanager = self.secrets_patcher.start()
+        # Set up mock blob client
+        self.mock_blob_service_client = MagicMock()
+        self.mock_container_client = MagicMock()
+        self.mock_blob_client = MagicMock()
+        self.mock_container_client.get_blob_client.return_value = self.mock_blob_client
+        self.mock_blob_service_client.get_container_client.return_value = self.mock_container_client
+        self.mock_blob.return_value = self.mock_blob_service_client
         
-        # Set up DynamoDB table mock
-        self.mock_table = MagicMock()
-        self.mock_dynamodb.Table.return_value = self.mock_table
+        # Mock download_blob_to_file
+        self.mock_blob_client.download_blob_to_file = MagicMock()
 
     def tearDown(self):
         """Clean up test environment."""
         # Clean up environment variables
         for key in [
-            "DOCUMENTS_BUCKET", "METADATA_TABLE", "STAGE", "DB_SECRET_ARN",
-            "GEMINI_SECRET_ARN", "GEMINI_EMBEDDING_MODEL", "TEMPERATURE",
+            "DOCUMENTS_CONTAINER", "DOCUMENTS_STORAGE", "METADATA_COSMOS_ACCOUNT", 
+            "METADATA_COSMOS_DATABASE", "METADATA_CONTAINER", "STAGE", "DB_SECRET_URI",
+            "GEMINI_SECRET_URI", "GEMINI_EMBEDDING_MODEL", "TEMPERATURE",
             "MAX_OUTPUT_TOKENS", "TOP_K", "TOP_P", "SIMILARITY_THRESHOLD"
         ]:
             if key in os.environ:
                 del os.environ[key]
                 
         # Stop patchers
-        self.s3_patcher.stop()
-        self.dynamodb_patcher.stop()
-        self.secrets_patcher.stop()
+        self.blob_patcher.stop()
+        self.cosmos_patcher.stop()
+        self.secret_patcher.stop()
+        self.credential_patcher.stop()
+        self.client_patcher.stop()
 
-    @patch("document_processor.document_processor.secretsmanager")
-    def test_get_gemini_api_key(self, mock_secretsmanager):
-        """Test getting Gemini API key from Secrets Manager."""
-        # Mock the Secrets Manager response
-        mock_secret_string = json.dumps({"GEMINI_API_KEY": "mock-api-key"})
-        mock_response = {"SecretString": mock_secret_string}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+    @patch("document_processor.document_processor.SecretClient")
+    def test_get_gemini_api_key(self, mock_secret_client):
+        """Test getting Gemini API key from Azure Key Vault."""
+        # Mock the Key Vault response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps({"GEMINI_API_KEY": "mock-api-key"})
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         api_key = get_gemini_api_key()
 
         # Verify results
         self.assertEqual(api_key, "mock-api-key")
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-gemini-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("gemini-api-key")
         
-    @patch("document_processor.document_processor.secretsmanager")
-    def test_get_postgres_credentials(self, mock_secretsmanager):
-        """Test getting PostgreSQL credentials from Secrets Manager."""
-        # Mock the Secrets Manager response
+    @patch("document_processor.document_processor.SecretClient")
+    def test_get_postgres_credentials(self, mock_secret_client):
+        """Test getting PostgreSQL credentials from Azure Key Vault."""
+        # Mock the Key Vault response
         mock_credentials = {
             "host": "test-host",
             "port": 5432,
@@ -88,17 +103,18 @@ class TestDocumentProcessor(unittest.TestCase):
             "password": "test-password",
             "dbname": "test-db"
         }
-        mock_response = {"SecretString": json.dumps(mock_credentials)}
-        mock_secretsmanager.get_secret_value.return_value = mock_response
+        mock_secret = MagicMock()
+        mock_secret.value = json.dumps(mock_credentials)
+        mock_client_instance = MagicMock()
+        mock_client_instance.get_secret.return_value = mock_secret
+        mock_secret_client.return_value = mock_client_instance
 
         # Call the function
         credentials = get_postgres_credentials()
 
         # Verify results
         self.assertEqual(credentials, mock_credentials)
-        mock_secretsmanager.get_secret_value.assert_called_once_with(
-            SecretId="test-db-secret"
-        )
+        mock_client_instance.get_secret.assert_called_once_with("db-credentials")
 
     @patch("document_processor.document_processor.psycopg2")
     def test_get_postgres_connection(self, mock_psycopg2):
@@ -302,23 +318,21 @@ class TestDocumentProcessor(unittest.TestCase):
         mock_get_creds.return_value = {"host": "test-host"}
         
         # Test parameters
-        bucket = "test-bucket"
-        key = "uploads/user-1/doc-1/test.pdf"
+        container_name = "test-container"
+        blob_path = "uploads/user-1/doc-1/test.pdf"
         document_id = "doc-1"
         user_id = "user-1"
         mime_type = "application/pdf"
         
         # Call the function
-        num_chunks, chunk_ids = process_document(bucket, key, document_id, user_id, mime_type)
+        num_chunks, chunk_ids = process_document(container_name, blob_path, document_id, user_id, mime_type)
         
         # Verify results
         self.assertEqual(num_chunks, 2)
         self.assertEqual(chunk_ids, ["chunk-1", "chunk-2"])
         
-        # Verify S3 download
-        self.mock_s3.download_file.assert_called_once_with(
-            bucket, key, "/tmp/test_file"
-        )
+        # Verify blob download
+        self.mock_blob_client.download_blob_to_file.assert_called_once()
         
         # Verify temporary file cleanup
         mock_unlink.assert_called_once_with("/tmp/test_file")
@@ -336,73 +350,100 @@ class TestDocumentProcessor(unittest.TestCase):
         # Verify chunk insertions
         self.assertEqual(mock_cursor.execute.call_count, 3)  # 1 for document + 2 for chunks
 
-    def test_handler_healthcheck(self):
-        """Test the Lambda handler for a health check."""
-        # Create a health check event
-        event = {"action": "healthcheck"}
-
-        # Call the handler
-        response = handler(event, {})
-
+    @patch("document_processor.document_processor.func")
+    def test_main_healthcheck(self, mock_func):
+        """Test the Azure Function for a health check."""
+        # Create a health check request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {"action": "healthcheck"}
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Document processor is healthy")
         self.assertEqual(response_body["stage"], "test")
 
+    @patch("document_processor.document_processor.func")
     @patch("document_processor.document_processor.process_document")
-    def test_handler_s3_event(self, mock_process):
-        """Test the Lambda handler for an S3 event."""
+    def test_main_event_request(self, mock_process, mock_func):
+        """Test the Azure Function for a document processing request."""
         # Mock the process_document function
         mock_process.return_value = (2, ["chunk-1", "chunk-2"])
         
-        # Create an S3 event
-        event = {
-            "Records": [
-                {
-                    "s3": {
-                        "bucket": {
-                            "name": "test-bucket"
-                        },
-                        "object": {
-                            "key": "uploads/user-1/doc-1/test.pdf"
-                        }
-                    }
-                }
-            ]
+        # Create a document event request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {
+            "container": "test-container",
+            "blob_path": "uploads/user-1/doc-1/test.pdf",
+            "document_id": "doc-1",
+            "user_id": "user-1",
+            "mime_type": "application/pdf"
         }
-
-        # Call the handler
-        response = handler(event, {})
-
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected data
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
         self.assertEqual(response_body["message"], "Successfully processed document: doc-1")
         self.assertEqual(response_body["document_id"], "doc-1")
         self.assertEqual(response_body["num_chunks"], 2)
         
         # Verify process_document call
         mock_process.assert_called_once_with(
-            "test-bucket", "uploads/user-1/doc-1/test.pdf", "doc-1", "user-1", "application/pdf"
+            "test-container", "uploads/user-1/doc-1/test.pdf", "doc-1", "user-1", "application/pdf"
         )
+
+    @patch("document_processor.document_processor.func")
+    @patch("document_processor.document_processor.process_document")
+    def test_main_error_handling(self, mock_process, mock_func):
+        """Test the Azure Function error handling."""
+        # Mock process_document to raise an exception
+        mock_process.side_effect = Exception("Error processing document")
         
-        # Verify DynamoDB put_item call
-        self.mock_table.put_item.assert_called_once()
-
-    def test_handler_direct_invocation(self):
-        """Test the Lambda handler for a direct invocation with no Records."""
-        # Create a direct invocation event (no Records)
-        event = {}
-
-        # Call the handler
-        response = handler(event, {})
-
+        # Create a document event request
+        mock_req = MagicMock()
+        mock_req.get_json.return_value = {
+            "container": "test-container",
+            "blob_path": "uploads/user-1/doc-1/test.pdf",
+            "document_id": "doc-1",
+            "user_id": "user-1",
+            "mime_type": "application/pdf"
+        }
+        
+        # Mock HTTP response
+        mock_http_response = MagicMock()
+        mock_func.HttpResponse.return_value = mock_http_response
+        
+        # Call the function
+        response = main(mock_req)
+        
         # Verify results
-        self.assertEqual(response["statusCode"], 200)
-        response_body = json.loads(response["body"])
-        self.assertEqual(response_body["message"], "Document processor is healthy")
-        self.assertEqual(response_body["stage"], "test")
+        self.assertEqual(response, mock_http_response)
+        mock_func.HttpResponse.assert_called_once()
+        # Check that the response contains the expected error message
+        call_args = mock_func.HttpResponse.call_args
+        response_body = json.loads(call_args[0][0])
+        self.assertTrue("Error processing document" in response_body["message"])
+        self.assertEqual(call_args[1]["status_code"], 500)
 
 
 if __name__ == "__main__":
