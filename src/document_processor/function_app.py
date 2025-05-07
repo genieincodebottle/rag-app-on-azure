@@ -2,30 +2,47 @@ import logging
 import azure.functions as func
 import os
 import json
-import base64
 import tempfile
+import urllib.parse
+import uuid
+from datetime import datetime
 from PyPDF2 import PdfReader
-from azure.cosmos import CosmosClient
 from azure.storage.blob import BlobServiceClient
+from azure.cosmos import CosmosClient
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
-from datetime import datetime
-from sentence_transformers import SentenceTransformer
-import uuid
-
-app = func.FunctionApp()
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from google import genai
+from google.genai import types
 
 # ENV
 COSMOS_SECRET_URI = os.environ.get("COSMOS_SECRET_URI")
 BLOB_SECRET_URI = os.environ.get("BLOB_SECRET_URI")
 CONTAINER_NAME = os.environ.get("BLOB_CONTAINER", "documents")
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+GEMINI_SECRET_URI = os.environ.get("GEMINI_SECRET_URI")
+GEMINI_MODEL = os.environ.get("GEMINI_EMBEDDING_MODEL")
+STAGE = os.environ.get("STAGE", "dev")
+
+TEMPERATURE = float(os.environ.get("TEMPERATURE", 0.2))
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", 1024))
+TOP_K = int(os.environ.get("TOP_K", 10))
+TOP_P = float(os.environ.get("TOP_P", 0.95))
+
+app = func.FunctionApp()
 
 def get_secret(secret_uri: str) -> str:
     vault_url, secret_name = secret_uri.split("|")
     credential = DefaultAzureCredential()
     client = SecretClient(vault_url=vault_url, credential=credential)
     return client.get_secret(secret_name).value
+
+# Init Gemini client
+try:
+    gemini_key = get_secret(GEMINI_SECRET_URI)
+    client = genai.Client(api_key=gemini_key)
+except Exception as e:
+    logging.error(f"Gemini config failed: {e}")
 
 def download_blob(file_name):
     connection_string = get_secret(BLOB_SECRET_URI)
@@ -47,26 +64,43 @@ def extract_text_from_pdf(file_path):
         logging.warning(f"PDF extract failed: {e}")
         return ""
 
-def split_into_chunks(text, max_length=500):
-    words = text.split()
-    return [" ".join(words[i:i + max_length]) for i in range(0, len(words), max_length)]
+def chunk_text(text):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len,
+        separators=["\n\n", "\n", " ", ""]
+    )
+    docs = splitter.create_documents([text])
+    return docs
 
-def store_chunks(user_id, document_id, chunks):
+def embed_text(text: str):
+    try:
+        result = client.models.embed_content(
+            model=GEMINI_MODEL,
+            contents=text,
+            config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY")
+        )
+        return list(result.embeddings[0].values)
+    except Exception as e:
+        logging.warning(f"Gemini embed error: {e}")
+        return [0.0] * 768
+
+def store_chunks(user_id, document_id, docs):
     conn_str = get_secret(COSMOS_SECRET_URI)
     cosmos_client = CosmosClient.from_connection_string(conn_str)
-    db = cosmos_client.get_database_client("ragdb")
-    container = db.get_container_client("chunks")
+    container = cosmos_client.get_database_client("ragdb").get_container_client("chunks")
     now = datetime.utcnow().isoformat()
 
-    for chunk_text, embedding in chunks:
+    for doc in docs:
         chunk = {
             "id": str(uuid.uuid4()),
             "chunk_id": str(uuid.uuid4()),
             "document_id": document_id,
             "user_id": user_id,
-            "content": chunk_text,
-            "metadata": {},
-            "embedding": embedding,
+            "content": doc.page_content,
+            "metadata": doc.metadata,
+            "embedding": embed_text(doc.page_content),
             "created_at": now,
             "updated_at": now
         }
@@ -75,7 +109,6 @@ def store_chunks(user_id, document_id, chunks):
 @app.function_name(name="document_processor")
 @app.route(route="document", methods=["POST"])
 def process_document(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Document processing started.")
     try:
         body = req.get_json()
         file_name = body["file_name"]
@@ -84,20 +117,14 @@ def process_document(req: func.HttpRequest) -> func.HttpResponse:
 
         file_path = download_blob(file_name)
         text = extract_text_from_pdf(file_path)
-        chunks_raw = split_into_chunks(text)
-
-        model = SentenceTransformer(EMBEDDING_MODEL)
-        embeddings = model.encode(chunks_raw)
-
-        chunks = list(zip(chunks_raw, embeddings.tolist()))
-        store_chunks(user_id, document_id, chunks)
+        docs = chunk_text(text)
+        store_chunks(user_id, document_id, docs)
 
         return func.HttpResponse(
-            json.dumps({"message": "Document processed", "chunks_stored": len(chunks)}),
+            json.dumps({"message": "Document processed", "chunks_stored": len(docs)}),
             status_code=200,
             mimetype="application/json"
         )
-
     except Exception as e:
-        logging.exception("Document processing failed")
+        logging.exception("Processing failed")
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
