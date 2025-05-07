@@ -283,9 +283,8 @@ jobs:
 
       - name: Upload Function ZIP files to Blob Storage
         run: |
-          STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}tfstate"
           # Ensure storage account name is valid (lowercase alphanumeric, 3-24 chars)
-          STORAGE_ACCOUNT_VALID=$(echo "$STORAGE_ACCOUNT" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+          STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
           CONTAINER_NAME="functions"
           RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
 
