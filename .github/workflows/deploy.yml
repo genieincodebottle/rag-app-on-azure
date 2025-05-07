@@ -228,22 +228,26 @@ jobs:
 
       - name: Create Azure Resource Group and Storage for Terraform State
         run: |
-            # Login to Azure
-            az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
-            
-            # Create Resource Group for Terraform State
-            RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-tfstate-rg"
-            echo "Creating Resource Group $RESOURCE_GROUP if it doesn't exist..."
-            az group create --name $RESOURCE_GROUP --location $LOCATION
-            
-            # Create Storage Account for Terraform State
-            STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}tfstate"
-            echo "Creating Storage Account $STORAGE_ACCOUNT if it doesn't exist..."
-            az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob
-            
-            # Create Storage Container for Terraform State
-            echo "Creating Storage Container for Terraform State..."
-            az storage container create --name tfstate --account-name $STORAGE_ACCOUNT
+          # Login to Azure
+          az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
+      
+          # Explicitly set subscription
+          az account set --subscription $ARM_SUBSCRIPTION_ID
+      
+          # Create Resource Group for Terraform State
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-tfstate-rg"
+          echo "Creating Resource Group $RESOURCE_GROUP if it doesn't exist..."
+          az group create --name $RESOURCE_GROUP --location $LOCATION
+      
+          # Create Storage Account for Terraform State
+          STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}tfstate"
+          echo "Creating Storage Account $STORAGE_ACCOUNT if it doesn't exist..."
+          az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob
+      
+          # Create Storage Container for Terraform State
+          echo "Creating Storage Container for Terraform State..."
+          az storage container create --name tfstate --account-name $STORAGE_ACCOUNT
+      
                 
       - name: Download Function artifacts
         uses: actions/download-artifact@v4
