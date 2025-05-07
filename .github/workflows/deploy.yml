@@ -264,7 +264,6 @@ jobs:
           echo "Creating Storage Account $STORAGE_ACCOUNT in RG $RESOURCE_GROUP if it doesn't exist..."
           az storage account create --name "$STORAGE_ACCOUNT" \
             --resource-group "$RESOURCE_GROUP" \
-            --subscription "$ARM_SUBSCRIPTION_ID" \
             --sku Standard_LRS \
             --encryption-services blob
       
