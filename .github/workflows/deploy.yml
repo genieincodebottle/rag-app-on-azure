@@ -56,6 +56,9 @@ jobs:
       wait_for_db: ${{ steps.set-env.outputs.wait_for_db }}
       project_name: ${{ steps.read-vars.outputs.project_name }}
       location: ${{ steps.read-vars.outputs.location }}
+      storage_account: ${{ steps.read-vars.outputs.storage_account }}
+      container_name: ${{ steps.read-vars.outputs.container_name }}
+      resource_group: ${{ steps.read-vars.outputs.resource_group }}
       bastion_allowed_cidr: ${{ steps.read-vars.outputs.bastion_allowed_cidr }}
       enable_lifecycle_rules: ${{ steps.read-vars.outputs.enable_lifecycle_rules }}
     steps:
@@ -101,6 +104,16 @@ jobs:
           
           echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
           echo "location=$LOCATION" >> $GITHUB_OUTPUT
+          
+          # Ensure storage account name is valid (lowercase alphanumeric, 3-24 chars)
+          STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
+          echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
+          
+          CONTAINER_NAME="functions"
+          echo "container_name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
+          
+          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
+          echo "resource_group=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
           
           # Set Blob Storage lifecycle variables - enable for prod, disable for dev
           if [[ "$ENV" == "prod" ]]; then
@@ -235,11 +248,6 @@ jobs:
 
       - name: Upload Function ZIP files to Blob Storage
         run: |
-          # Ensure storage account name is valid (lowercase alphanumeric, 3-24 chars)
-          STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
-          CONTAINER_NAME="functions"
-          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
-      
           # Login to Azure using service principal credentials
           az login --service-principal \
             --username ${{ env.ARM_CLIENT_ID }} \
@@ -250,21 +258,21 @@ jobs:
           az account set --subscription ${{ env.ARM_SUBSCRIPTION_ID }}
           
           # Ensure Resource Group exists
-          az group create --name $RESOURCE_GROUP --location $LOCATION
+          az group create --name ${{ needs.determine_environment.outputs.resource_group }} --location ${{ needs.determine_environment.outputs.location }}
           
           # Ensure Storage Account exists
-          az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob --kind StorageV2
+          az storage account create --resource-group ${{ needs.determine_environment.outputs.resource_group }} --name ${{ needs.determine_environment.outputs.storage_account }} --sku Standard_LRS --encryption-services blob --kind StorageV2
       
           # Ensure Container exists
-          az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT
+          az storage container create --name ${{ needs.determine_environment.outputs.container_name }} --account-name ${{ needs.determine_environment.outputs.storage_account }}
           
           # Get Storage Account Key
-          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
+          STORAGE_KEY=$(az storage account keys list --resource-group ${{ needs.determine_environment.outputs.resource_group }} --account-name ${{ needs.determine_environment.outputs.storage_account }} --query "[0].value" -o tsv)
           
           # Upload Function ZIP files
           for ZIP_FILE in function_artifacts/*.zip; do
             FILENAME=$(basename $ZIP_FILE)
-            az storage blob upload --account-name $STORAGE_ACCOUNT --container-name $CONTAINER_NAME --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY
+            az storage blob upload --account-name ${{ needs.determine_environment.outputs.storage_account }} --container-name ${{ needs.determine_environment.outputs.container_name }} --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY
           done
         
       - name: Setup Terraform
