@@ -13,9 +13,9 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 app = func.FunctionApp()
 
 # Environment variables
-STAGE = os.environ.get("STAGE", "dev")
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", 5))
-RETRY_DELAY = int(os.environ.get("RETRY_DELAY", 10))
+STAGE = os.environ.get("STAGE")
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES"))
+RETRY_DELAY = int(os.environ.get("RETRY_DELAY"))
 DB_SECRET_URI = os.environ.get("DB_SECRET_URI")
 
 def get_postgres_credentials():

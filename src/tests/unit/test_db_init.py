@@ -23,8 +23,8 @@ class TestDbInit(unittest.TestCase):
 
     def setUp(self):
         # Mock Azure clients
-        self.secret_patcher = patch("db_init.db_init.SecretClient")
-        self.credential_patcher = patch("db_init.db_init.DefaultAzureCredential")
+        self.secret_patcher = patch("db_init.function_app.SecretClient")
+        self.credential_patcher = patch("db_init.function_app.DefaultAzureCredential")
         
         self.mock_secret = self.secret_patcher.start()
         self.mock_credential = self.credential_patcher.start()
@@ -55,7 +55,7 @@ class TestDbInit(unittest.TestCase):
         self.secret_patcher.stop()
         self.credential_patcher.stop()
 
-    @patch("db_init.db_init.SecretClient")
+    @patch("db_init.function_app.SecretClient")
     def test_get_postgres_credentials(self, mock_secret_client):
         """Test getting PostgreSQL credentials from Azure Key Vault."""
         # Mock the Key Vault response
@@ -79,7 +79,7 @@ class TestDbInit(unittest.TestCase):
         self.assertEqual(credentials, mock_credentials)
         mock_client_instance.get_secret.assert_called_once_with("db-credentials")
 
-    @patch("db_init.db_init.socket.gethostbyname")
+    @patch("db_init.function_app.socket.gethostbyname")
     def test_check_dns_resolution_success(self, mock_gethostbyname):
         """Test successful DNS resolution."""
         # Mock the socket.gethostbyname function
@@ -92,7 +92,7 @@ class TestDbInit(unittest.TestCase):
         self.assertTrue(result)
         mock_gethostbyname.assert_called_once_with("test-host")
 
-    @patch("db_init.db_init.socket.gethostbyname")
+    @patch("db_init.function_app.socket.gethostbyname")
     def test_check_dns_resolution_failure(self, mock_gethostbyname):
         """Test failed DNS resolution."""
         # Mock the socket.gethostbyname function to raise an exception
@@ -105,9 +105,9 @@ class TestDbInit(unittest.TestCase):
         self.assertFalse(result)
         mock_gethostbyname.assert_called_once_with("test-host")
         
-    @patch("db_init.db_init.psycopg2")
-    @patch("db_init.db_init.check_dns_resolution")
-    @patch("db_init.db_init.time.sleep")
+    @patch("db_init.function_app.psycopg2")
+    @patch("db_init.function_app.check_dns_resolution")
+    @patch("db_init.function_app.time.sleep")
     def test_create_database_if_not_exists_success(self, mock_sleep, mock_check_dns, mock_psycopg2):
         """Test creating a database successfully."""
         # Mock DNS resolution
@@ -150,9 +150,9 @@ class TestDbInit(unittest.TestCase):
         mock_cursor.execute.assert_any_call("SELECT 1 FROM pg_database WHERE datname = 'test-db'")
         mock_cursor.execute.assert_any_call("CREATE DATABASE test-db")
         
-    @patch("db_init.db_init.psycopg2")
-    @patch("db_init.db_init.check_dns_resolution")
-    @patch("db_init.db_init.time.sleep")
+    @patch("db_init.function_app.psycopg2")
+    @patch("db_init.function_app.check_dns_resolution")
+    @patch("db_init.function_app.time.sleep")
     def test_create_database_if_not_exists_already_exists(self, mock_sleep, mock_check_dns, mock_psycopg2):
         """Test when database already exists."""
         # Mock DNS resolution
@@ -187,8 +187,8 @@ class TestDbInit(unittest.TestCase):
         # Verify database check but no creation
         mock_cursor.execute.assert_called_once_with("SELECT 1 FROM pg_database WHERE datname = 'test-db'")
         
-    @patch("db_init.db_init.check_dns_resolution")
-    @patch("db_init.db_init.time.sleep")
+    @patch("db_init.function_app.check_dns_resolution")
+    @patch("db_init.function_app.time.sleep")
     def test_create_database_if_not_exists_dns_failure(self, mock_sleep, mock_check_dns):
         """Test handling DNS resolution failure with retries."""
         # Mock DNS resolution to fail
@@ -211,9 +211,9 @@ class TestDbInit(unittest.TestCase):
         self.assertEqual(mock_check_dns.call_count, 4)  # Initial + 3 retries
         self.assertEqual(mock_sleep.call_count, 3)  # Sleep between retries
         
-    @patch("db_init.db_init.psycopg2")
-    @patch("db_init.db_init.check_dns_resolution")
-    @patch("db_init.db_init.time.sleep")
+    @patch("db_init.function_app.psycopg2")
+    @patch("db_init.function_app.check_dns_resolution")
+    @patch("db_init.function_app.time.sleep")
     def test_initialize_database_success(self, mock_sleep, mock_check_dns, mock_psycopg2):
         """Test successful database initialization."""
         # Mock DNS resolution
@@ -254,8 +254,8 @@ class TestDbInit(unittest.TestCase):
         # Check that pgvector extension is created
         mock_cursor.execute.assert_any_call("CREATE EXTENSION IF NOT EXISTS vector")
         
-    @patch("db_init.db_init.check_dns_resolution")
-    @patch("db_init.db_init.time.sleep")
+    @patch("db_init.function_app.check_dns_resolution")
+    @patch("db_init.function_app.time.sleep")
     def test_initialize_database_dns_failure(self, mock_sleep, mock_check_dns):
         """Test handling DNS resolution failure with retries in initialize_database."""
         # Mock DNS resolution to fail
@@ -278,8 +278,8 @@ class TestDbInit(unittest.TestCase):
         self.assertEqual(mock_check_dns.call_count, 4)  # Initial + 3 retries
         self.assertEqual(mock_sleep.call_count, 3)  # Sleep between retries
         
-    @patch("db_init.db_init.psycopg2")
-    @patch("db_init.db_init.check_dns_resolution")
+    @patch("db_init.function_app.psycopg2")
+    @patch("db_init.function_app.check_dns_resolution")
     def test_initialize_database_connection_error(self, mock_check_dns, mock_psycopg2):
         """Test handling database connection errors."""
         # Mock DNS resolution to succeed
@@ -299,7 +299,7 @@ class TestDbInit(unittest.TestCase):
         }
         
         # Call the function (max retries is 3 from setup)
-        with patch("db_init.db_init.time.sleep") as mock_sleep:
+        with patch("db_init.function_app.time.sleep") as mock_sleep:
             result = initialize_database(credentials)
         
         # Verify results
@@ -310,10 +310,10 @@ class TestDbInit(unittest.TestCase):
         self.assertEqual(mock_psycopg2.connect.call_count, 4)  # Initial + 3 retries
         self.assertEqual(mock_sleep.call_count, 3)  # Sleep between retries
         
-    @patch("db_init.db_init.func")
-    @patch("db_init.db_init.get_postgres_credentials")
-    @patch("db_init.db_init.create_database_if_not_exists")
-    @patch("db_init.db_init.initialize_database")
+    @patch("db_init.function_app.func")
+    @patch("db_init.function_app.get_postgres_credentials")
+    @patch("db_init.function_app.create_database_if_not_exists")
+    @patch("db_init.function_app.initialize_database")
     def test_main_success(self, mock_initialize, mock_create_db, mock_get_creds, mock_func):
         """Test the Azure Function for successful execution."""
         # Mock credential retrieval
@@ -355,9 +355,9 @@ class TestDbInit(unittest.TestCase):
         mock_create_db.assert_called_once_with(mock_credentials, "test-db")
         mock_initialize.assert_called_once_with(mock_credentials)
         
-    @patch("db_init.db_init.func")
-    @patch("db_init.db_init.get_postgres_credentials")
-    @patch("db_init.db_init.create_database_if_not_exists")
+    @patch("db_init.function_app.func")
+    @patch("db_init.function_app.get_postgres_credentials")
+    @patch("db_init.function_app.create_database_if_not_exists")
     def test_main_create_db_failure(self, mock_create_db, mock_get_creds, mock_func):
         """Test the Azure Function when database creation fails."""
         # Mock credential retrieval
@@ -396,10 +396,10 @@ class TestDbInit(unittest.TestCase):
         )
         self.assertEqual(call_args[1]["status_code"], 500)
         
-    @patch("db_init.db_init.func")
-    @patch("db_init.db_init.get_postgres_credentials")
-    @patch("db_init.db_init.create_database_if_not_exists")
-    @patch("db_init.db_init.initialize_database")
+    @patch("db_init.function_app.func")
+    @patch("db_init.function_app.get_postgres_credentials")
+    @patch("db_init.function_app.create_database_if_not_exists")
+    @patch("db_init.function_app.initialize_database")
     def test_main_initialize_db_failure(self, mock_initialize, mock_create_db, mock_get_creds, mock_func):
         """Test the Azure Function when database initialization fails."""
         # Mock credential retrieval
@@ -439,7 +439,7 @@ class TestDbInit(unittest.TestCase):
         )
         self.assertEqual(call_args[1]["status_code"], 500)
         
-    @patch("db_init.db_init.func")
+    @patch("db_init.function_app.func")
     def test_main_healthcheck(self, mock_func):
         """Test the Azure Function for a health check."""
         # Override environment variable to ensure it's correct
