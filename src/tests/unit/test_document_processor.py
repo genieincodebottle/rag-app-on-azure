@@ -24,7 +24,7 @@ os.environ["SIMILARITY_THRESHOLD"] = "0.7"
 
 # Now import the module under test - mocks are already in place globally from conftest
 from document_processor.function_app import (
-    main, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
+    process_document, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
     embed_query, embed_documents, get_document_loader, chunk_documents, process_document
 )
 
@@ -362,7 +362,7 @@ class TestDocumentProcessor(unittest.TestCase):
         mock_func.HttpResponse.return_value = mock_http_response
         
         # Call the function
-        response = main(mock_req)
+        response = process_document(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
@@ -395,7 +395,7 @@ class TestDocumentProcessor(unittest.TestCase):
         mock_func.HttpResponse.return_value = mock_http_response
         
         # Call the function
-        response = main(mock_req)
+        response = process_document(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
@@ -434,7 +434,7 @@ class TestDocumentProcessor(unittest.TestCase):
         mock_func.HttpResponse.return_value = mock_http_response
         
         # Call the function
-        response = main(mock_req)
+        response = process_document(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)

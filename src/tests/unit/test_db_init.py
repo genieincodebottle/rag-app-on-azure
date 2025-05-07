@@ -14,7 +14,7 @@ os.environ["RETRY_DELAY"] = "1"  # Short delay for tests
 
 # Now import the module under test
 from db_init.function_app import (
-    main, get_postgres_credentials, check_dns_resolution,
+    run_db_init, get_postgres_credentials, check_dns_resolution,
     create_database_if_not_exists, initialize_database
 )
 
@@ -339,7 +339,7 @@ class TestDbInit(unittest.TestCase):
         mock_req.get_json.return_value = {}
         
         # Call the function
-        response = main(mock_req)
+        response = run_db_init(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
@@ -382,7 +382,7 @@ class TestDbInit(unittest.TestCase):
         mock_req.get_json.return_value = {}
         
         # Call the function
-        response = main(mock_req)
+        response = run_db_init(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
@@ -425,7 +425,7 @@ class TestDbInit(unittest.TestCase):
         mock_req.get_json.return_value = {}
         
         # Call the function
-        response = main(mock_req)
+        response = run_db_init(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
@@ -454,7 +454,7 @@ class TestDbInit(unittest.TestCase):
         mock_func.HttpResponse.return_value = mock_http_response
         
         # Call the function
-        response = main(mock_req)
+        response = run_db_init(mock_req)
         
         # Verify results
         self.assertEqual(response, mock_http_response)
