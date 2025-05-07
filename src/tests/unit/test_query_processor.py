@@ -23,7 +23,7 @@ os.environ["TOP_K"] = "40"
 os.environ["TOP_P"] = "0.8"
 
 # Now import the module under test - mocks are already in place globally from conftest
-from query_processor.query_processor import (
+from query_processor.function_app import (
     main, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
     embed_query, embed_documents, similarity_search, generate_response, DecimalEncoder
 )

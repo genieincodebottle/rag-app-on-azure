@@ -23,7 +23,7 @@ os.environ["TOP_P"] = "0.8"
 os.environ["SIMILARITY_THRESHOLD"] = "0.7"
 
 # Now import the module under test - mocks are already in place globally from conftest
-from document_processor.document_processor import (
+from document_processor.function_app import (
     main, get_gemini_api_key, get_postgres_credentials, get_postgres_connection,
     embed_query, embed_documents, get_document_loader, chunk_documents, process_document
 )

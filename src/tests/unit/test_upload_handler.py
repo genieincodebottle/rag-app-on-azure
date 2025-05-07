@@ -16,7 +16,7 @@ os.environ["STAGE"] = "test"
 os.environ["DB_SECRET_URI"] = "https://test-kv.vault.azure.net/secrets/db-credentials"
 
 # Now import the module under test - mocks are already in place globally from conftest
-from upload_handler.upload_handler import (
+from upload_handler.function_app import (
     main, get_postgres_credentials, get_postgres_connection, get_mime_type
 )
 

@@ -13,7 +13,7 @@ os.environ["MAX_RETRIES"] = "3"
 os.environ["RETRY_DELAY"] = "1"  # Short delay for tests
 
 # Now import the module under test
-from db_init.db_init import (
+from db_init.function_app import (
     main, get_postgres_credentials, check_dns_resolution,
     create_database_if_not_exists, initialize_database
 )
