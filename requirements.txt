@@ -3,7 +3,7 @@ azure-storage-blob
 azure-cosmos
 azure-identity
 azure-keyvault-secrets
-psycopg2-binary0
+psycopg2-binary
 google-genai
 langchain
 langchain-community
