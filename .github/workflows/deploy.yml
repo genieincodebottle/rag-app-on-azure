@@ -226,6 +226,11 @@ jobs:
           # Create dynamic backend.tf
           cd environments/$STAGE
           
+          RESOURCE_GROUP="${RESOURCE_GROUP}"
+          STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
+          CONTAINER_NAME="${CONTAINER_NAME}"
+          STAGE="${STAGE}"
+
           # Create backend.tf dynamically to use variables
           cat > backend.tf << EOF
           # =========================
