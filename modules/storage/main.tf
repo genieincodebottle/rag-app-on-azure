@@ -120,7 +120,10 @@ resource "azurerm_cosmosdb_sql_container" "metadata" {
   resource_group_name = var.resource_group_name
   account_name        = azurerm_cosmosdb_account.metadata.name
   database_name       = azurerm_cosmosdb_sql_database.metadata.name
-  partition_key_path  = "/id"
+  
+  partition_key {
+    paths = ["/id"]
+  }
   
   # Configure indexing policy for efficient queries
   indexing_policy {

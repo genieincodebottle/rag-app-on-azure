@@ -42,6 +42,11 @@ variable "db_name" {
   default     = "ragapp"
 }
 
+variable "db_server_name" {
+  description = "Name of the database server"
+  type        = string
+}
+
 variable "db_sku_name" {
   description = "SKU name for the PostgreSQL Flexible Server"
   type        = string
