@@ -217,37 +217,11 @@ jobs:
       CONTAINER_NAME: ${{ needs.determine_environment.outputs.container_name }}
       RESOURCE_GROUP: ${{ needs.determine_environment.outputs.resource_group }}
       STORAGE_ACCOUNT: ${{ needs.determine_environment.outputs.storage_account }}
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      
-      - name: Create Backend Configuration 
-        run: |
-          # Create dynamic backend.tf
-          cd environments/$STAGE
-          
-          #RESOURCE_GROUP="${RESOURCE_GROUP}"
-          #STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
-          #CONTAINER_NAME="${CONTAINER_NAME}"
-          #STAGE="${STAGE}"
 
-          # Create backend.tf dynamically to use variables
-          cat > backend.tf << EOF
-          # =========================
-          # Terraform Backend Config
-          # =========================
-          terraform {
-            backend "azurerm" {
-              resource_group_name  = "${PROJECT_NAME}-${STAGE}-tfstate-rg"
-              storage_account_name = "ragappdevtfstate"
-              container_name       = "tfstate"
-              key                  = "${STAGE}/terraform.tfstate"
-            }
-          }
-          EOF
-          
-          cd ../..
-                
       - name: Download Function artifacts
         uses: actions/download-artifact@v4
         with:
@@ -256,77 +230,62 @@ jobs:
 
       - name: Upload Function ZIP files to Blob Storage
         run: |
-          # Login to Azure using service principal credentials
           az login --service-principal \
             --username ${{ env.ARM_CLIENT_ID }} \
             --password ${{ env.ARM_CLIENT_SECRET }} \
             --tenant ${{ env.ARM_TENANT_ID }}
-          
-          # Set the subscription
+
           az account set --subscription ${{ env.ARM_SUBSCRIPTION_ID }}
-          
-          # Ensure Resource Group exists
+
           az group create --name $RESOURCE_GROUP --location $LOCATION
-          
-          # Ensure Storage Account exists
           az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob --kind StorageV2
-      
-          # Ensure Container exists
           az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT
-          
-          # Get Storage Account Key
+
           STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
-          
-          # Upload Function ZIP files
+
           for ZIP_FILE in function_artifacts/*.zip; do
             FILENAME=$(basename $ZIP_FILE)
             az storage blob upload --account-name $STORAGE_ACCOUNT --container-name $CONTAINER_NAME --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY --overwrite true
           done
-        
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
-  
+
       - name: Terraform Init and Backend Setup
-        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        working-directory: environments/${{ env.STAGE }}
         run: |
-          # Remove any backend configuration if it exists
           rm -f backend.tf
-          
-          # First initialize without backend
+
           terraform init
-          
-          # Create backend resources using local state
-          terraform apply -auto-approve -target=azurerm_resource_group.tfstate -target=azurerm_storage_account.tfstate -target=azurerm_storage_container.tfstate
-          
-          cat > backend.tf << EOF
+
+          terraform apply -auto-approve \
+            -target=azurerm_resource_group.tfstate \
+            -target=azurerm_storage_account.tfstate \
+            -target=azurerm_storage_container.tfstate
+
+          cat > backend.tf <<EOF
           terraform {
             backend "azurerm" {
-              resource_group_name  = $RESOURCE_GROUP
-              storage_account_name = $STORAGE_ACCOUNT
-              container_name       = $CONTAINER_NAME
+              resource_group_name  = "${RESOURCE_GROUP}"
+              storage_account_name = "${STORAGE_ACCOUNT}"
+              container_name       = "${CONTAINER_NAME}"
               key                  = "${STAGE}/terraform.tfstate"
             }
           }
           EOF
-          
-          # Reinitialize with the backend
+
           terraform init -reconfigure
 
-      - name: Terraform Init
-        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
-        run: terraform init
-      
       - name: Import Existing Resources
-        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        working-directory: environments/${{ env.STAGE }}
         run: |
           chmod +x ../../scripts/import_resources.sh
-          # ../../scripts/import_resources.sh "$PROJECT_NAME" "$STAGE" "$LOCATION" > /dev/null 2>&1 || true
           ../../scripts/import_resources.sh "$PROJECT_NAME" "$STAGE" "$LOCATION" || true
-      
+
       - name: Terraform Plan
-        working-directory: environments/${{ needs.determine_environment.outputs.environment }}
+        working-directory: environments/${{ env.STAGE }}
         run: |
           terraform plan \
             -lock=false \
@@ -334,12 +293,12 @@ jobs:
             -var="enable_lifecycle_rules=${{ needs.determine_environment.outputs.enable_lifecycle_rules }}" \
             -var="bastion_allowed_cidr=[\"${{ needs.determine_environment.outputs.bastion_allowed_cidr }}\"]" \
             -out=tfplan
-        
+
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan-${{ needs.determine_environment.outputs.environment }}
-          path: environments/${{ needs.determine_environment.outputs.environment }}/tfplan
+          name: terraform-plan-${{ env.STAGE }}
+          path: environments/${{ env.STAGE }}/tfplan
           retention-days: 1
 
   terraform-apply:
