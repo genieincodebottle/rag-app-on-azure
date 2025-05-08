@@ -24,7 +24,7 @@ github_branch = "develop"
 # -------------------------
 # Monitoring
 # -------------------------
-alert_email = "dev-admin@example.com"
+alert_email = "rajsrivastava2@gmail.com"
 
 # -------------------------
 # Network Settings
