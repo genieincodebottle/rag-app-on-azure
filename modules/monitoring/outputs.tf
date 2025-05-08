@@ -22,5 +22,5 @@ output "log_analytics_workspace_name" {
 
 output "dashboard_id" {
   description = "ID of the Azure Monitor Dashboard"
-  value       = azurerm_dashboard.main.id
+  value       = azurerm_portal_dashboard.main.id
 }

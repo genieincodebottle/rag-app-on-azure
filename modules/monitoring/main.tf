@@ -152,7 +152,7 @@ resource "azurerm_monitor_metric_alert" "upload_handler_errors" {
 # Azure Monitor Dashboard
 # ==============================
 
-resource "azurerm_dashboard" "main" {
+resource "azurerm_portal_dashboard" "main" {
   name                = "${local.name}-dashboard"
   resource_group_name = var.resource_group_name
   location            = var.location
