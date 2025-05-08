@@ -109,7 +109,7 @@ jobs:
           STORAGE_ACCOUNT=$(echo "${PROJECT_NAME}${STAGE}tfstate" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g' | cut -c1-24)
           echo "storage_account=$STORAGE_ACCOUNT" >> $GITHUB_OUTPUT
           
-          CONTAINER_NAME="functions"
+          CONTAINER_NAME="tfstate"
           echo "container_name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
           
           RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
@@ -214,6 +214,9 @@ jobs:
       PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
       STAGE: ${{ needs.determine_environment.outputs.environment }}
       LOCATION: ${{ needs.determine_environment.outputs.location }}
+      CONTAINER_NAME: ${{ needs.determine_environment.outputs.container_name }}
+      RESOURCE_GROUP: ${{ needs.determine_environment.outputs.resource_group }}
+      STORAGE_ACCOUNT: ${{ needs.determine_environment.outputs.storage_account }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -230,9 +233,9 @@ jobs:
           # =========================
           terraform {
             backend "azurerm" {
-              resource_group_name  = "${PROJECT_NAME}-${STAGE}-tfstate-rg"
-              storage_account_name = "${PROJECT_NAME}${STAGE}tfstate"
-              container_name       = "tfstate"
+              resource_group_name  = $RESOURCE_GROUP
+              storage_account_name = $STORAGE_ACCOUNT
+              container_name       = $CONTAINER_NAME
               key                  = "${STAGE}/terraform.tfstate"
             }
           }
@@ -258,21 +261,21 @@ jobs:
           az account set --subscription ${{ env.ARM_SUBSCRIPTION_ID }}
           
           # Ensure Resource Group exists
-          az group create --name ${{ needs.determine_environment.outputs.resource_group }} --location ${{ needs.determine_environment.outputs.location }}
+          az group create --name $RESOURCE_GROUP --location $LOCATION
           
           # Ensure Storage Account exists
-          az storage account create --resource-group ${{ needs.determine_environment.outputs.resource_group }} --name ${{ needs.determine_environment.outputs.storage_account }} --sku Standard_LRS --encryption-services blob --kind StorageV2
+          az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT --sku Standard_LRS --encryption-services blob --kind StorageV2
       
           # Ensure Container exists
-          az storage container create --name ${{ needs.determine_environment.outputs.container_name }} --account-name ${{ needs.determine_environment.outputs.storage_account }}
+          az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT
           
           # Get Storage Account Key
-          STORAGE_KEY=$(az storage account keys list --resource-group ${{ needs.determine_environment.outputs.resource_group }} --account-name ${{ needs.determine_environment.outputs.storage_account }} --query "[0].value" -o tsv)
+          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
           
           # Upload Function ZIP files
           for ZIP_FILE in function_artifacts/*.zip; do
             FILENAME=$(basename $ZIP_FILE)
-            az storage blob upload --account-name ${{ needs.determine_environment.outputs.storage_account }} --container-name ${{ needs.determine_environment.outputs.container_name }} --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY --overwrite true
+            az storage blob upload --account-name $STORAGE_ACCOUNT --container-name $CONTAINER_NAME --name $FILENAME --file $ZIP_FILE --account-key $STORAGE_KEY --overwrite true
           done
         
       - name: Setup Terraform
@@ -295,9 +298,9 @@ jobs:
           cat > backend.tf << EOF
           terraform {
             backend "azurerm" {
-              resource_group_name  = "${{ needs.determine_environment.outputs.resource_group }}"
-              storage_account_name = "${{ needs.determine_environment.outputs.storage_account }}"
-              container_name       = "tfstate"
+              resource_group_name  = $RESOURCE_GROUP
+              storage_account_name = $STORAGE_ACCOUNT
+              container_name       = $CONTAINER_NAME
               key                  = "${STAGE}/terraform.tfstate"
             }
           }
@@ -345,7 +348,9 @@ jobs:
       LOCATION: ${{ needs.determine_environment.outputs.location }}
       RESET_DB_PASSWORD: ${{ needs.determine_environment.outputs.reset_db_password }}
       WAIT_FOR_DB: ${{ needs.determine_environment.outputs.wait_for_db }}
-    
+      CONTAINER_NAME: ${{ needs.determine_environment.outputs.container_name }}
+      RESOURCE_GROUP: ${{ needs.determine_environment.outputs.resource_group }}
+      STORAGE_ACCOUNT: ${{ needs.determine_environment.outputs.storage_account }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -387,7 +392,7 @@ jobs:
           ATTEMPT=1
           
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            STATUS=$(az postgres server show --name $SERVER_NAME --resource-group "${PROJECT_NAME}-${STAGE}-rg" --query "userVisibleState" -o tsv 2>/dev/null || echo "not-found")
+            STATUS=$(az postgres server show --name $SERVER_NAME --resource-group $RESOURCE_GROUP --query "userVisibleState" -o tsv 2>/dev/null || echo "not-found")
             
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PostgreSQL status is '$STATUS'"
             
@@ -434,7 +439,7 @@ jobs:
               # Set Key Vault reference
               az functionapp config appsettings set \
                 --name "$FUNCTION_NAME" \
-                --resource-group "${PROJECT_NAME}-${STAGE}-rg" \
+                --resource-group $RESOURCE_GROUP \
                 --settings "DB_SECRET_URI=@Microsoft.KeyVault(SecretUri=https://${KEY_VAULT_NAME}.vault.azure.net/secrets/db-credentials)"
               
               echo "Updated DB_SECRET_URI for $FUNCTION_NAME"
@@ -446,9 +451,6 @@ jobs:
       - name: Update Function apps
         run: |
           # Update Function apps with code
-          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
-          STORAGE_ACCOUNT="${PROJECT_NAME}${STAGE}funcs"
-          CONTAINER_NAME="functions"
           
           FUNCTION_NAMES=(
             "${PROJECT_NAME}-${STAGE}-document-processor"
@@ -467,7 +469,7 @@ jobs:
           )
           
           # Get Storage Account Key
-          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
+          STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name ${{ needs.determine_environment.outputs.storage_account }} --query "[0].value" -o tsv)
           
           for i in "${!FUNCTION_NAMES[@]}"; do
             FUNCTION_NAME="${FUNCTION_NAMES[$i]}"
@@ -478,9 +480,9 @@ jobs:
             # Generate SAS URL for the zip file
             EXPIRY_DATE=$(date -u -d "30 minutes" '+%Y-%m-%dT%H:%MZ')
             SAS_URL=$(az storage blob generate-sas \
-              --account-name $STORAGE_ACCOUNT \
+              --account-name ${{ needs.determine_environment.outputs.storage_account }} \
               --account-key $STORAGE_KEY \
-              --container-name $CONTAINER_NAME \
+              --container-name ${{ needs.determine_environment.outputs.container_name }} \
               --name $ZIP_FILE \
               --permissions r \
               --expiry $EXPIRY_DATE \
@@ -498,7 +500,6 @@ jobs:
       - name: Invoke Database Init Function
         run: |
           DB_INIT_NAME="${PROJECT_NAME}-${STAGE}-db-init"
-          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
           
           # Invoke the database initialization Function to set up PGVector
           echo "Initializing PostgreSQL database with PGVector..."
@@ -548,7 +549,6 @@ jobs:
       - name: Verify deployment
         run: |
           UPLOAD_HANDLER_NAME="${PROJECT_NAME}-${STAGE}-upload-handler"
-          RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
           
           echo "Verifying deployment by invoking ${UPLOAD_HANDLER_NAME}..."
           
@@ -582,7 +582,7 @@ jobs:
       PROJECT_NAME: ${{ needs.determine_environment.outputs.project_name }}
       STAGE: ${{ needs.determine_environment.outputs.environment }}
       LOCATION: ${{ needs.determine_environment.outputs.location }}
-    
+      RESOURCE_GROUP: ${{ needs.determine_environment.outputs.resource_group }}
     steps:
       - uses: actions/checkout@v4
       
@@ -622,11 +622,10 @@ jobs:
             echo "Attempting to get API endpoint from Azure CLI..."
             
             # Fallback to using Azure CLI directly if terraform fails
-            RESOURCE_GROUP="${PROJECT_NAME}-${STAGE}-rg"
             API_NAME="${PROJECT_NAME}-${STAGE}-api"
             
             # Get API Management service URL
-            API_URL=$(az apim show --name "$API_NAME" --resource-group "$RESOURCE_GROUP" --query "gatewayUrl" -o tsv 2>/dev/null)
+            API_URL=$(az apim show --name "$API_NAME" --resource-group $RESOURCE_GROUP --query "gatewayUrl" -o tsv 2>/dev/null)
             
             if [ -n "$API_URL" ] && [ "$API_URL" != "null" ]; then
               echo "Found API Management service: $API_URL"
