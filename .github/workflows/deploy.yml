@@ -233,9 +233,9 @@ jobs:
           # =========================
           terraform {
             backend "azurerm" {
-              resource_group_name  = $RESOURCE_GROUP
-              storage_account_name = $STORAGE_ACCOUNT
-              container_name       = $CONTAINER_NAME
+              resource_group_name  = "$RESOURCE_GROUP"
+              storage_account_name = "$STORAGE_ACCOUNT"
+              container_name       = "$CONTAINER_NAME"
               key                  = "${STAGE}/terraform.tfstate"
             }
           }
