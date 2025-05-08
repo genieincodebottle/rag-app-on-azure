@@ -226,10 +226,10 @@ jobs:
           # Create dynamic backend.tf
           cd environments/$STAGE
           
-          RESOURCE_GROUP="${RESOURCE_GROUP}"
-          STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
-          CONTAINER_NAME="${CONTAINER_NAME}"
-          STAGE="${STAGE}"
+          #RESOURCE_GROUP="${RESOURCE_GROUP}"
+          #STORAGE_ACCOUNT="${STORAGE_ACCOUNT}"
+          #CONTAINER_NAME="${CONTAINER_NAME}"
+          #STAGE="${STAGE}"
 
           # Create backend.tf dynamically to use variables
           cat > backend.tf << EOF
@@ -238,9 +238,9 @@ jobs:
           # =========================
           terraform {
             backend "azurerm" {
-              resource_group_name  = "$RESOURCE_GROUP"
-              storage_account_name = "$STORAGE_ACCOUNT"
-              container_name       = "$CONTAINER_NAME"
+              resource_group_name  = "${RESOURCE_GROUP}"
+              storage_account_name = "${STORAGE_ACCOUNT}"
+              container_name       = "${CONTAINER_NAME}"
               key                  = "${STAGE}/terraform.tfstate"
             }
           }
