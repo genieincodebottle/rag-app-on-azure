@@ -266,11 +266,6 @@ output "vnet_id" {
   value       = module.network.vnet_id
 }
 
-output "db_server_name" {
-  description = "Name of the PostgreSQL server"
-  value       = module.database.db_server_name
-}
-
 output "key_vault_name" {
   description = "Name of the Key Vault"
   value       = module.database.key_vault_name
